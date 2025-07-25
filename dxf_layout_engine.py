@@ -24,6 +24,15 @@ MARGEM_ESQUERDA = 50
 MARGEM_SUPERIOR = 50
 MARGEM_INFERIOR = 50
 
+# --- Dimensões Fixas para Fallback (Adicionado) ---
+# Usadas se calcular_bbox_dxf retornar 0x0
+PLANO_DXF_FIXED_WIDTH_MM = 236.0
+PLANO_DXF_FIXED_HEIGHT_MM = 21.5
+
+ITEM_DXF_FIXED_WIDTH_MM = 129.0
+ITEM_DXF_FIXED_HEIGHT_MM = 225.998
+
+
 def compor_dxf_personalizado(
     file_ids_and_skus: list[dict],
     plan_name: str,
@@ -50,7 +59,7 @@ def compor_dxf_personalizado(
     msp = doc.modelspace()
 
     # Estrutura para organizar os DXFs por cor e furo
-    # { 'DOU': { '2FH': [ {dxf_entity, original_sku, bbox_width, bbox_height}, ... ] } }
+    # { 'DOU': { '2FH': [ {dxf_entity, original_sku, bbox_width, bbox_height, original_min_x, original_min_y}, ... ] } }
     organized_dxfs = defaultdict(lambda: defaultdict(list))
     
     # --- 1. Baixar e Organizar DXFs de Itens ---
@@ -93,6 +102,15 @@ def compor_dxf_personalizado(
             dxf_width = max_x - min_x
             dxf_height = max_y - min_y
 
+            # --- Fallback para dimensões fixas se bbox for 0x0 (Adicionado) ---
+            if dxf_width == 0.0 and dxf_height == 0.0:
+                print(f"[WARN] Dimensões de SKU '{sku}' calculadas como 0x0. Usando dimensões fixas: {ITEM_DXF_FIXED_WIDTH_MM}x{ITEM_DXF_FIXED_HEIGHT_MM} mm.")
+                dxf_width = ITEM_DXF_FIXED_WIDTH_MM
+                dxf_height = ITEM_DXF_FIXED_HEIGHT_MM
+                # Para o offset, assumimos que o ponto de origem do desenho é (0,0) se não houver bbox válido
+                min_x, min_y = 0.0, 0.0 
+            # --- Fim do Fallback ---
+
             entities_to_add = []
             for entity in item_msp:
                 entities_to_add.append(entity.copy())
@@ -130,6 +148,15 @@ def compor_dxf_personalizado(
             min_x_plano, min_y_plano, max_x_plano, max_y_plano = calcular_bbox_dxf(plano_msp)
             plano_width = max_x_plano - min_x_plano
             plano_height = max_y_plano - min_y_plano
+
+            # --- Fallback para dimensões fixas se bbox for 0x0 (Adicionado) ---
+            if plano_width == 0.0 and plano_height == 0.0:
+                print(f"[WARN] Dimensões do plano '{plan_name}.dxf' calculadas como 0x0. Usando dimensões fixas: {PLANO_DXF_FIXED_WIDTH_MM}x{PLANO_DXF_FIXED_HEIGHT_MM} mm.")
+                plano_width = PLANO_DXF_FIXED_WIDTH_MM
+                plano_height = PLANO_DXF_FIXED_HEIGHT_MM
+                # Para o offset, assumimos que o ponto de origem do desenho é (0,0) se não houver bbox válido
+                min_x_plano, min_y_plano = 0.0, 0.0
+            # --- Fim do Fallback ---
 
             plano_block_name = f"PLANO_INFO_{plan_name.replace('.','_')}"
             if plano_block_name not in doc.blocks:
