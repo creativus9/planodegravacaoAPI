@@ -1,4 +1,5 @@
 import ezdxf
+from ezdxf.math import BoundingBox, Vec3 # Adiciona importação de BoundingBox e Vec3
 
 def parse_sku(sku: str):
     """
@@ -20,33 +21,42 @@ def calcular_bbox_dxf(msp):
     """
     Calcula o bounding box (caixa delimitadora) de todas as entidades no modelspace de um DXF.
     Retorna (min_x, min_y, max_x, max_y).
-    Esta versão itera sobre as entidades para maior compatibilidade.
+    Esta versão itera sobre as entidades e usa BoundingBox para maior robustez.
     """
-    min_x, min_y = float('inf'), float('inf')
-    max_x, max_y = float('-inf'), float('-inf')
-
-    found_valid_bbox = False
+    bbox_union = BoundingBox() # Inicializa uma caixa delimitadora vazia
+    found_any_entity = False # Flag para verificar se alguma entidade foi processada
 
     for e in msp:
+        found_any_entity = True # Encontrou pelo menos uma entidade
         try:
-            bb = e.bbox()
-            if bb.extmin and bb.extmax:
-                exmin, exmax = bb.extmin, bb.extmax
-                min_x = min(min_x, exmin.x)
-                min_y = min(min_y, exmin.y)
-                max_x = max(max_x, exmax.x)
-                max_y = max(max_y, exmax.y)
-                found_valid_bbox = True
+            # Tenta obter a caixa delimitadora da entidade
+            entity_bbox = e.bbox()
+            
+            if entity_bbox.is_empty:
+                # Se a bbox da entidade for vazia, pula para a próxima
+                continue
+
+            # Adiciona os pontos extremos da bbox da entidade à bbox de união
+            bbox_union.extend(entity_bbox.extmin)
+            bbox_union.extend(entity_bbox.extmax)
+
         except Exception as err:
-            # Algumas entidades podem não ter bbox ou causar erro ao calcular
-            # print(f"[WARN] Erro ao calcular bbox para entidade {e.dxf.handle}: {err}")
-            pass # Ignora entidades que não podem ter bbox
+            # Ignora entidades que causam erro no cálculo da bbox
+            pass
 
-    if not found_valid_bbox: # Nenhum bbox válido encontrado
-        print(f"[WARN] Nenhuma entidade com bbox válido encontrada no modelspace. Retornando 0,0,0,0.")
-        return 0, 0, 0, 0 # Retorna um bbox vazio
+    if not found_any_entity:
+        print(f"[WARN] Nenhuma entidade encontrada no modelspace para calcular bbox. Retornando 0,0,0,0.")
+        return 0, 0, 0, 0
 
-    # Adicionando uma validação básica para garantir que min < max
+    if bbox_union.is_empty:
+        print(f"[WARN] Bounding box união está vazio (provavelmente todas as entidades tinham bbox vazio ou erro). Retornando 0,0,0,0.")
+        return 0, 0, 0, 0
+
+    # Extrai as coordenadas da caixa delimitadora de união
+    min_x, min_y = bbox_union.extmin.x, bbox_union.extmin.y
+    max_x, max_y = bbox_union.extmax.x, bbox_union.extmax.y
+
+    # Validação básica: se min_x/y for maior ou igual a max_x/y, significa que não há extensão de geometria válida
     if min_x >= max_x or min_y >= max_y:
         print(f"[WARN] Bounding box calculado é inválido (min >= max). Retornando 0,0,0,0. (min_x={min_x}, max_x={max_x}, min_y={min_y}, max_y={max_y})")
         return 0, 0, 0, 0
