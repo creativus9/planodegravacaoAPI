@@ -3,7 +3,7 @@ import ezdxf
 import re
 import datetime
 from collections import defaultdict
-from typing import Optional, List, Dict # Adiciona List e Dict para tipagem
+from typing import Optional, List, Dict
 
 # Importa as funções utilitárias e de Google Drive
 from dxf_utils import parse_sku, calcular_bbox_dxf
@@ -42,7 +42,6 @@ def compor_dxf_personalizado(
     """
     Componha um novo arquivo DXF organizando múltiplos planos de corte
     e seus respectivos itens.
-    Gera um DXF de saída e um PNG de visualização.
 
     Args:
         plans: Lista de dicionários, cada um representando um plano de corte.
@@ -51,15 +50,12 @@ def compor_dxf_personalizado(
         output_filename: Opcional. Nome do arquivo DXF de saída. Se não fornecido, será gerado automaticamente.
 
     Returns:
-        O caminho local para o arquivo DXF de saída e o caminho local para o PNG de visualização.
+        O caminho local para o arquivo DXF de saída.
     """
     doc = ezdxf.new('R2010') # Use uma versão do DXF compatível
     msp = doc.modelspace()
 
-    # Lista para armazenar dados para a geração do PNG (posições finais de todos os elementos)
-    png_layout_data = []
-
-    # current_y_cursor: Representa a coordenada Y do TOPO do próximo elemento a ser posicionado
+    # current_y_cursor: Representa a coordenada Y do TOPO do próximo bloco de plano/itens a ser posicionado
     # Começa do topo da folha, abaixo da margem superior
     current_y_cursor = FOLHA_ALTURA_MM - MARGEM_SUPERIOR
     print(f"[DEBUG] Posição inicial do cursor Y (topo da folha - margem): {current_y_cursor:.2f} mm")
@@ -121,21 +117,13 @@ def compor_dxf_personalizado(
             plano_info_dxf_path = None
 
         # --- Inserir o DXF do Plano de Corte no Modelspace ---
+        # A posição Y para o canto inferior esquerdo do bloco do plano
+        # é o cursor atual menos a altura do plano
+        plano_insert_y = current_y_cursor - plano_height
+        
         if plano_info_dxf_path and plano_block_name:
-            # A posição Y para o canto inferior esquerdo do bloco do plano
-            plano_insert_y = current_y_cursor - plano_height
             msp.add_blockref(plano_block_name, insert=(MARGEM_ESQUERDA, plano_insert_y))
             print(f"[DEBUG] Plano de corte '{plan_name}.dxf' inserido em X:{MARGEM_ESQUERDA:.2f}, Y:{plano_insert_y:.2f}. Topo em Y:{current_y_cursor:.2f}")
-            
-            # Adicionar o plano de corte aos dados do PNG para visualização
-            png_layout_data.append({
-                'dxf_path': plano_info_dxf_path,
-                'sku': f"PLANO-{plan_name}", # SKU fictício para identificação no PNG
-                'pos_x': MARGEM_ESQUERDA,
-                'pos_y': plano_insert_y,
-                'width': plano_width,
-                'height': plano_height
-            })
             
             # Atualiza o cursor Y para o próximo elemento (abaixo do plano + espaçamento)
             current_y_cursor = plano_insert_y - ESPACAMENTO_PLANO_COR
@@ -267,16 +255,6 @@ def compor_dxf_personalizado(
                         new_ent.translate(offset_x, offset_y, 0)
                         msp.add_entity(new_ent)
                     
-                    # Adicionar dados para o PNG
-                    png_layout_data.append({
-                        'dxf_path': f"/tmp/{sku}.dxf",
-                        'sku': sku,
-                        'pos_x': current_x_pos,
-                        'pos_y': row_base_y,
-                        'width': bbox_width,
-                        'height': bbox_height
-                    })
-                    
                     print(f"[DEBUG] Item '{sku}' inserido em X:{current_x_pos:.2f}, Y:{row_base_y:.2f}. Offset: ({offset_x:.2f}, {offset_y:.2f})")
                     current_x_pos += bbox_width
                     first_dxf_in_group = False
@@ -291,23 +269,17 @@ def compor_dxf_personalizado(
         print(f"[DEBUG] Cursor Y após plano '{plan_name}' e seus itens: {current_y_cursor:.2f} mm (abaixo do bloco do plano + espaçamento entre planos)")
 
 
-    # --- 4. Salvar e Gerar PNG ---
+    # --- 4. Salvar DXF ---
     # O nome do arquivo de saída é passado como argumento, se não, gera um padrão.
     final_output_dxf_name = output_filename if output_filename else f"Plano de Gravação {datetime.datetime.now().strftime('%d-%m-%Y_%H%M%S')}.dxf"
-    final_output_png_name = final_output_dxf_name.replace('.dxf', '.png')
-
+    
     # Caminhos temporários para salvar localmente antes do upload
     caminho_saida_dxf = f"/tmp/{final_output_dxf_name}"
-    caminho_saida_png = f"/tmp/{final_output_png_name}"
-
+    
     os.makedirs(os.path.dirname(caminho_saida_dxf) or '.', exist_ok=True)
     doc.saveas(caminho_saida_dxf)
     print(f"[INFO] DXF de saída salvo: {caminho_saida_dxf}")
 
-    # Gerar a imagem PNG
-    # Passamos o caminho do DXF de saída para o nome do PNG e todos os dados de layout
-    gerar_imagem_plano(caminho_saida_dxf, "N/A", png_layout_data) # O plano_info_dxf_path não é mais único aqui
-    
-    # Retorna os caminhos locais. O upload será feito no main.py.
-    return caminho_saida_dxf, caminho_saida_png
+    # Retorna apenas o caminho local do DXF. O upload será feito no main.py.
+    return caminho_saida_dxf
 
