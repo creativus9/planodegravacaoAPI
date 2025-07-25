@@ -7,7 +7,7 @@ import datetime
 import ezdxf # Importa ezdxf aqui
 
 # Importações das funções de composição DXF e de interação com o Google Drive
-from dxf_layout_engine import generate_single_plan_layout_data, FOLHA_LARGURA_MM, ESPACAMENTO_LINHA_COR # Importa a nova função e constantes
+from dxf_layout_engine import generate_single_plan_layout_data, FOLHA_LARGURA_MM, ESPACAMENTO_LINHA_COR, NoEntitiesFoundError # Importa a nova função, constantes e a exceção
 from google_drive_utils import upload_to_drive, mover_arquivos_antigos, buscar_arquivo_personalizado_por_id_e_sku
 
 app = FastAPI()
@@ -91,35 +91,54 @@ async def compor_plano(entrada: EntradaComposicao):
         for i, plan_data in enumerate(sorted_plans):
             print(f"[INFO] Processando plano '{plan_data.plan_name}' ({i+1}/{len(sorted_plans)})...")
             
-            # Gera os dados do layout para um único plano
-            entities_with_relative_coords, layout_width, layout_height = \
-                generate_single_plan_layout_data(
-                    file_ids_and_skus=[item.model_dump() for item in plan_data.items],
-                    plan_name=plan_data.plan_name,
-                    drive_folder_id=entrada.id_pasta_entrada_drive
-                )
-            
-            if not entities_with_relative_coords:
-                print(f"[WARN] Plano '{plan_data.plan_name}' não gerou entidades. Pulando.")
-                continue
-
-            # Atualiza a largura máxima geral do documento
-            max_overall_width = max(max_overall_width, layout_width)
-
-            # Adiciona as entidades do plano atual ao modelspace principal, com o offset vertical
-            for ent, x_rel, y_rel in entities_with_relative_coords:
-                # O (x_rel, y_rel) já é relativo ao canto inferior esquerdo do layout do plano.
-                # Precisamos transladar para a posição global no documento principal.
-                # current_y_offset_global é a base Y para o plano atual.
-                new_ent = ent.copy() # Copia a entidade novamente para o novo documento
-                new_ent.translate(0, current_y_offset_global, 0) # Aplica o offset vertical
-                msp.add_entity(new_ent)
+            try:
+                # Gera os dados do layout para um único plano
+                entities_with_relative_coords, layout_width, layout_height = \
+                    generate_single_plan_layout_data(
+                        file_ids_and_skus=[item.model_dump() for item in plan_data.items],
+                        plan_name=plan_data.plan_name,
+                        drive_folder_id=entrada.id_pasta_entrada_drive
+                    )
                 
-            print(f"[DEBUG] Plano '{plan_data.plan_name}' adicionado ao DXF principal na altura Y: {current_y_offset_global:.2f} mm.")
+                # Se a função retornar sem levantar exceção, mas a lista de entidades estiver vazia,
+                # isso é um problema. No novo dxf_layout_engine, isso levantaria NoEntitiesFoundError.
+                if not entities_with_relative_coords:
+                    print(f"[WARN] Plano '{plan_data.plan_name}' não gerou entidades visíveis. Pulando.")
+                    continue # Ou levantar um erro mais específico aqui se cada plano for crítico
 
-            # Atualiza o offset Y global para o próximo plano
-            # Adiciona a altura do layout do plano atual mais um espaçamento entre planos
-            current_y_offset_global += layout_height + ESPACAMENTO_LINHA_COR # Reutiliza ESPACAMENTO_LINHA_COR para planos
+                # Atualiza a largura máxima geral do documento
+                max_overall_width = max(max_overall_width, layout_width)
+
+                # Adiciona as entidades do plano atual ao modelspace principal, com o offset vertical
+                for ent, x_rel, y_rel in entities_with_relative_coords:
+                    # O (x_rel, y_rel) já é relativo ao canto inferior esquerdo do layout do plano.
+                    # Precisamos transladar para a posição global no documento principal.
+                    # current_y_offset_global é a base Y para o plano atual.
+                    new_ent = ent.copy() # Copia a entidade novamente para o novo documento
+                    new_ent.translate(0, current_y_offset_global, 0) # Aplica o offset vertical
+                    msp.add_entity(new_ent)
+                    
+                print(f"[DEBUG] Plano '{plan_data.plan_name}' adicionado ao DXF principal na altura Y: {current_y_offset_global:.2f} mm.")
+
+                # Atualiza o offset Y global para o próximo plano
+                # Adiciona a altura do layout do plano atual mais um espaçamento entre planos
+                current_y_offset_global += layout_height + ESPACAMENTO_LINHA_COR # Reutiliza ESPACAMENTO_LINHA_COR para planos
+
+            except NoEntitiesFoundError as e:
+                print(f"[ERROR] Erro na geração do layout para o plano '{plan_data.plan_name}': {e}")
+                # Se um plano específico não gerou entidades, consideramos uma falha para a requisição inteira.
+                # Isso impede a geração de um DXF incompleto ou vazio.
+                raise HTTPException(status_code=400, detail=f"Falha ao gerar layout para o plano '{plan_data.plan_name}': {e}")
+            except FileNotFoundError as e:
+                print(f"[ERROR] Erro de arquivo não encontrado para o plano '{plan_data.plan_name}': {e}")
+                raise HTTPException(status_code=404, detail=f"Arquivo necessário não encontrado para o plano '{plan_data.plan_name}': {e}")
+            except Exception as e:
+                print(f"[ERROR] Erro inesperado ao processar plano '{plan_data.plan_name}': {e}")
+                raise HTTPException(status_code=500, detail=f"Erro interno ao processar plano '{plan_data.plan_name}': {e}")
+
+        # Verifica se alguma entidade foi realmente adicionada ao documento principal
+        if not msp:
+            raise HTTPException(status_code=400, detail="Nenhuma entidade DXF válida foi gerada para nenhum dos planos fornecidos.")
 
         # Nome do arquivo de saída
         if entrada.output_filename:
@@ -156,6 +175,9 @@ async def compor_plano(entrada: EntradaComposicao):
             "dxf_url": url_dxf,
         }
 
+    except HTTPException as e:
+        # Re-levanta HTTPException para que o FastAPI a capture e retorne ao cliente
+        raise e
     except FileNotFoundError as e:
         print(f"[ERROR] Erro de arquivo não encontrado: {e}")
         raise HTTPException(status_code=404, detail=str(e))
