@@ -6,7 +6,7 @@ import os
 import datetime
 
 # Importações das funções de composição DXF e de interação com o Google Drive
-from dxf_composer import compor_dxf_personalizado
+from dxf_layout_engine import compor_dxf_personalizado # Importa do novo arquivo
 from google_drive_utils import upload_to_drive, mover_arquivos_antigos, buscar_arquivo_personalizado_por_id_e_sku
 
 app = FastAPI()
@@ -53,9 +53,9 @@ class EntradaComposicao(BaseModel):
 @app.post("/compor-plano")
 async def compor_plano(entrada: EntradaComposicao):
     """
-    Endpoint para compor um novo arquivo DXF e um PNG de visualização
+    Endpoint para compor um novo arquivo DXF
     baseado nos itens fornecidos, organizando-os por cor e tipo de furo.
-    Os arquivos resultantes são enviados para o Google Drive.
+    O arquivo DXF resultante é enviado para o Google Drive.
     """
     if not entrada.itens:
         raise HTTPException(status_code=400, detail="Nenhum item fornecido para composição.")
@@ -66,29 +66,24 @@ async def compor_plano(entrada: EntradaComposicao):
 
     try:
         # Chama a função principal de composição
-        caminho_dxf_saida, caminho_png_saida = compor_dxf_personalizado(
+        caminho_dxf_saida = compor_dxf_personalizado( # Agora retorna apenas o caminho do DXF
             file_ids_and_skus=[item.model_dump() for item in entrada.itens], # Passa como lista de dicionários
             plan_name=entrada.nome_plano_corte,
             drive_folder_id=entrada.id_pasta_drive
         )
 
-        # Faz o upload dos arquivos gerados para o Google Drive
+        # Faz o upload do arquivo DXF gerado para o Google Drive
         url_dxf = upload_to_drive(caminho_dxf_saida, os.path.basename(caminho_dxf_saida), "application/dxf", entrada.id_pasta_drive)
-        url_png = upload_to_drive(caminho_png_saida, os.path.basename(caminho_png_saida), "image/png", entrada.id_pasta_drive)
 
-        # Limpa os arquivos temporários após o upload
+        # Limpa o arquivo temporário após o upload
         if os.path.exists(caminho_dxf_saida):
             os.remove(caminho_dxf_saida)
             print(f"[INFO] Arquivo temporário DXF removido: {caminho_dxf_saida}")
-        if os.path.exists(caminho_png_saida):
-            os.remove(caminho_png_saida)
-            print(f"[INFO] Arquivo temporário PNG removido: {caminho_png_saida}")
 
         print(f"[INFO] Composição do plano '{entrada.nome_plano_corte}' concluída com sucesso.")
         return {
-            "message": "Plano de corte composto e enviado ao Google Drive com sucesso!",
+            "message": "Plano de corte DXF composto e enviado ao Google Drive com sucesso!",
             "dxf_url": url_dxf,
-            "png_url": url_png
         }
 
     except FileNotFoundError as e:
