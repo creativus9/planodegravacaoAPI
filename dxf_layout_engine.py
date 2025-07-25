@@ -7,7 +7,7 @@ from typing import Optional # Importa Optional
 
 # Importa as funções utilitárias e de Google Drive
 from dxf_utils import parse_sku, calcular_bbox_dxf
-from google_drive_utils import baixar_arquivo_drive, upload_to_drive # upload_to_drive ainda é usado para o DXF
+from google_drive_utils import baixar_arquivo_drive, upload_to_drive, buscar_arquivo_personalizado_por_id_e_sku # Importa buscar_arquivo_personalizado_por_id_e_sku
 
 # --- Configurações de Layout (em mm) ---
 # Tamanho da folha de corte (exemplo: A0 ou um tamanho personalizado)
@@ -37,9 +37,9 @@ def compor_dxf_personalizado(
     Gera um DXF de saída.
 
     Args:
-        file_ids_and_skus: Lista de dicionários, cada um com 'file_id' do Drive
+        file_ids_and_skus: Lista de dicionários, cada um com 'id_arquivo_drive' (ID lógico do nome) do Drive
                            e 'sku' correspondente.
-                           Ex: [{'file_id': 'abc', 'sku': 'PLAC-3010-2FH-AC-DOU-070-00000'}]
+                           Ex: [{'id_arquivo_drive': '250721QAF71Q8E', 'sku': 'PLAC-3010-2FH-AC-DOU-070-00000'}]
         plan_name: Nome do plano de corte (ex: "01", "A").
         drive_folder_id: ID da pasta principal do Google Drive.
         output_filename: Opcional. Nome do arquivo DXF de saída. Se não fornecido, será gerado automaticamente.
@@ -54,13 +54,11 @@ def compor_dxf_personalizado(
     # { 'DOU': { '2FH': [ {dxf_entity, original_sku, bbox_width, bbox_height}, ... ] } }
     organized_dxfs = defaultdict(lambda: defaultdict(list))
     
-    # png_layout_data removido
-
     # --- 1. Baixar e Organizar DXFs de Itens ---
     print("[INFO] Baixando e organizando DXFs de itens...")
     for item_data in file_ids_and_skus:
-        # CORREÇÃO AQUI: Usar 'id_arquivo_drive' em vez de 'file_id'
-        file_id = item_data['id_arquivo_drive'] 
+        # O ID da planilha é o 'target_id' para a busca pelo nome
+        target_id_from_sheet = item_data['id_arquivo_drive'] 
         sku = item_data['sku']
         
         hole_type, color_code = parse_sku(sku)
@@ -68,12 +66,29 @@ def compor_dxf_personalizado(
             print(f"[WARN] SKU '{sku}' inválido, ignorando item.")
             continue
 
-        # Baixar o arquivo DXF do Google Drive
-        local_dxf_name = f"{sku}.dxf"
+        # Primeiro, busca o ID real do arquivo no Drive usando o ID lógico e o SKU (para contexto)
+        # A função buscar_arquivo_personalizado_por_id_e_sku já lida com o padrão de nome
         try:
-            dxf_path_local = baixar_arquivo_drive(file_id, local_dxf_name, drive_folder_id)
+            real_file_id, nome_arquivo_drive = buscar_arquivo_personalizado_por_id_e_sku(
+                target_id=target_id_from_sheet,
+                sku=sku, # SKU é usado na busca, mas a principal é o target_id e "Arquivo Personalizado"
+                drive_folder_id=drive_folder_id
+            )
+            print(f"[INFO] Arquivo encontrado no Drive: ID real='{real_file_id}', Nome='{nome_arquivo_drive}'")
+        except FileNotFoundError as e:
+            print(f"[ERROR] Falha ao encontrar arquivo no Drive para ID lógico '{target_id_from_sheet}' e SKU '{sku}': {e}")
+            continue # Pula para o próximo item se não encontrar
         except Exception as e:
-            print(f"[ERROR] Falha ao baixar DXF para SKU '{sku}' (ID: {file_id}): {e}")
+            print(f"[ERROR] Erro inesperado ao buscar arquivo no Drive para ID lógico '{target_id_from_sheet}' e SKU '{sku}': {e}")
+            continue # Pula para o próximo item se houver erro na busca
+
+
+        # Agora, baixa o arquivo usando o ID real encontrado
+        local_dxf_name = f"{sku}.dxf" # Nome local temporário
+        try:
+            dxf_path_local = baixar_arquivo_drive(real_file_id, local_dxf_name, drive_folder_id)
+        except Exception as e:
+            print(f"[ERROR] Falha ao baixar DXF para SKU '{sku}' (ID real: {real_file_id}): {e}")
             continue # Pula para o próximo item se o download falhar
 
         try:
