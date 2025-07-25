@@ -30,7 +30,6 @@ FOLHA_LARGURA_MM, FOLHA_ALTURA_MM = 1200, 900 # Exemplo: 1.2m x 0.9m
 
 # Espaçamentos
 ESPACAMENTO_DXF_MESMO_FURO = 100  # Espaçamento horizontal entre DXFs do mesmo tipo de furo
-# ESPACAMENTO_DXF_FURO_DIFERENTE = 200 # Espaçamento horizontal entre grupos de furos diferentes (Substituído pela barra)
 ESPACAMENTO_LINHA_COR = 200       # Espaçamento vertical entre linhas de cores diferentes
 ESPACAMENTO_PLANO_COR = 100       # Espaçamento vertical entre o DXF do plano e a primeira linha de cor
 
@@ -347,20 +346,20 @@ def generate_single_plan_layout_data(
             if not first_format_in_line:
                 # Inserir separador antes de um novo formato
                 if barra_entities:
+                    print(f"DEBUG: Inserindo Barra.dxf antes do novo formato '{dxf_format}'. current_x_pos antes: {current_x_pos:.2f} mm")
                     current_x_pos += ESPACAMENTO_SEPARADOR
                     offset_x_barra = current_x_pos - barra_original_min_x
-                    # A barra deve estar alinhada com a base da linha de itens, ou um pouco acima se for mais alta
                     offset_y_barra = row_base_y - barra_original_min_y 
                     
                     for ent in barra_entities:
                         new_ent = ent.copy()
                         new_ent.translate(offset_x_barra, offset_y_barra, 0)
                         all_relative_entities_with_coords.append((new_ent, new_ent.dxf.insert.x if hasattr(new_ent.dxf, 'insert') else offset_x_barra, new_ent.dxf.insert.y if hasattr(new_ent.dxf, 'insert') else offset_y_barra))
-                    print(f"[DEBUG] Barra.dxf inserida antes do formato '{dxf_format}' em X:{current_x_pos:.2f}.")
+                    print(f"[DEBUG] Barra.dxf inserida em X:{current_x_pos:.2f}, Y:{offset_y_barra:.2f}. Largura da barra: {barra_width:.2f} mm.")
                     current_x_pos += barra_width + ESPACAMENTO_SEPARADOR # Avança X pela largura da barra + espaçamento
                 else:
                     current_x_pos += ESPACAMENTO_DXF_MESMO_FURO # Fallback se a barra não for carregada
-                print(f"[DEBUG] Avançando X para novo formato '{dxf_format}': {current_x_pos:.2f} mm")
+                print(f"[DEBUG] current_x_pos após barra (ou fallback) e espaçamento: {current_x_pos:.2f} mm")
             
             sorted_sizes = sorted(format_group.keys())
             first_size_in_format = True
@@ -370,6 +369,7 @@ def generate_single_plan_layout_data(
                 if not first_size_in_format:
                     # Inserir separador antes de um novo tamanho
                     if barra_entities:
+                        print(f"DEBUG: Inserindo Barra.dxf antes do novo tamanho '{dxf_size}'. current_x_pos antes: {current_x_pos:.2f} mm")
                         current_x_pos += ESPACAMENTO_SEPARADOR
                         offset_x_barra = current_x_pos - barra_original_min_x
                         offset_y_barra = row_base_y - barra_original_min_y
@@ -377,11 +377,11 @@ def generate_single_plan_layout_data(
                             new_ent = ent.copy()
                             new_ent.translate(offset_x_barra, offset_y_barra, 0)
                             all_relative_entities_with_coords.append((new_ent, new_ent.dxf.insert.x if hasattr(new_ent.dxf, 'insert') else offset_x_barra, new_ent.dxf.insert.y if hasattr(new_ent.dxf, 'insert') else offset_y_barra))
-                        print(f"[DEBUG] Barra.dxf inserida antes do tamanho '{dxf_size}' em X:{current_x_pos:.2f}.")
+                        print(f"[DEBUG] Barra.dxf inserida em X:{current_x_pos:.2f}, Y:{offset_y_barra:.2f}. Largura da barra: {barra_width:.2f} mm.")
                         current_x_pos += barra_width + ESPACAMENTO_SEPARADOR
                     else:
                         current_x_pos += ESPACAMENTO_DXF_MESMO_FURO
-                    print(f"[DEBUG] Avançando X para novo tamanho '{dxf_size}': {current_x_pos:.2f} mm")
+                    print(f"[DEBUG] current_x_pos após barra (ou fallback) e espaçamento: {current_x_pos:.2f} mm")
 
                 sorted_hole_types = sorted(size_group.keys())
                 first_hole_type_in_size = True
@@ -391,6 +391,7 @@ def generate_single_plan_layout_data(
                     if not first_hole_type_in_size:
                         # Inserir separador antes de um novo tipo de furo
                         if barra_entities:
+                            print(f"DEBUG: Inserindo Barra.dxf antes do novo furo '{hole_type}'. current_x_pos antes: {current_x_pos:.2f} mm")
                             current_x_pos += ESPACAMENTO_SEPARADOR
                             offset_x_barra = current_x_pos - barra_original_min_x
                             offset_y_barra = row_base_y - barra_original_min_y
@@ -398,11 +399,11 @@ def generate_single_plan_layout_data(
                                 new_ent = ent.copy()
                                 new_ent.translate(offset_x_barra, offset_y_barra, 0)
                                 all_relative_entities_with_coords.append((new_ent, new_ent.dxf.insert.x if hasattr(new_ent.dxf, 'insert') else offset_x_barra, new_ent.dxf.insert.y if hasattr(new_ent.dxf, 'insert') else offset_y_barra))
-                            print(f"[DEBUG] Barra.dxf inserida antes do furo '{hole_type}' em X:{current_x_pos:.2f}.")
+                            print(f"[DEBUG] Barra.dxf inserida em X:{current_x_pos:.2f}, Y:{offset_y_barra:.2f}. Largura da barra: {barra_width:.2f} mm.")
                             current_x_pos += barra_width + ESPACAMENTO_SEPARADOR
                         else:
                             current_x_pos += ESPACAMENTO_DXF_MESMO_FURO
-                        print(f"[DEBUG] Avançando X para novo grupo de furo '{hole_type}': {current_x_pos:.2f} mm")
+                        print(f"[DEBUG] current_x_pos após barra (ou fallback) e espaçamento: {current_x_pos:.2f} mm")
                     
                     # Ordenar DXFs dentro do grupo de furo (opcional, mas bom para consistência)
                     sorted_hole_type_dxfs = sorted(hole_type_group, key=lambda x: x['sku'])
@@ -429,7 +430,7 @@ def generate_single_plan_layout_data(
                             new_ent.translate(offset_x, offset_y, 0)
                             all_relative_entities_with_coords.append((new_ent, new_ent.dxf.insert.x if hasattr(new_ent.dxf, 'insert') else offset_x, new_ent.dxf.insert.y if hasattr(new_ent.dxf, 'insert') else offset_y))
                         
-                        print(f"[DEBUG] Item '{sku}' inserido em X:{current_x_pos:.2f}, Y:{row_base_y:.2f} (relativo).")
+                        print(f"[DEBUG] Item '{sku}' inserido em X:{current_x_pos:.2f}, Y:{row_base_y:.2f} (relativo). Largura do item: {bbox_width:.2f} mm.")
                         current_x_pos += bbox_width # Avança X pela largura do DXF
                         first_dxf_in_group = False
                     
