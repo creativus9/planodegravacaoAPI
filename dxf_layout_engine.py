@@ -24,12 +24,11 @@ MARGEM_ESQUERDA = 50
 MARGEM_SUPERIOR = 50
 MARGEM_INFERIOR = 50
 
-# COLOR_MAP e LETTER_MAP removidos, pois são apenas para PNG
-
 def compor_dxf_personalizado(
     file_ids_and_skus: list[dict],
     plan_name: str,
-    drive_folder_id: str
+    drive_folder_id: str,
+    output_filename: Optional[str] = None # Novo parâmetro opcional
 ):
     """
     Componha um novo arquivo DXF organizando os DXFs de entrada
@@ -42,6 +41,7 @@ def compor_dxf_personalizado(
                            Ex: [{'file_id': 'abc', 'sku': 'PLAC-3010-2FH-AC-DOU-070-00000'}]
         plan_name: Nome do plano de corte (ex: "01", "A").
         drive_folder_id: ID da pasta principal do Google Drive.
+        output_filename: Opcional. Nome do arquivo DXF de saída. Se não fornecido, será gerado automaticamente.
 
     Returns:
         O caminho local para o arquivo DXF de saída.
@@ -114,8 +114,7 @@ def compor_dxf_personalizado(
     
     plano_width = 0
     plano_height = 0
-    plano_insert_x = MARGEM_ESQUERDA # Posição inicial temporária
-    plano_insert_y = FOLHA_ALTURA_MM - MARGEM_SUPERIOR # Posição inicial temporária
+    # plano_insert_x e plano_insert_y serão calculados no final
 
     if os.path.exists(plano_info_dxf_path):
         try:
@@ -134,7 +133,6 @@ def compor_dxf_personalizado(
                 for ent in plano_msp:
                     blk.add_entity(ent.copy())
             
-            # Não adicionamos ao png_layout_data, apenas preparamos para inserção final no DXF
             print(f"[INFO] DXF do plano de corte '{plano_info_dxf_path}' carregado.")
 
         except ezdxf.DXFStructureError as e:
@@ -151,7 +149,7 @@ def compor_dxf_personalizado(
     # --- 3. Posicionar e Inserir DXFs de Itens ---
     # Para DXF, (0,0) é inferior esquerdo.
     
-    current_y_dxf = MARGEM_INFERIOR # Posição Y inicial para o primeiro item (base)
+    current_y_dxf_temp = MARGEM_INFERIOR # Posição Y inicial temporária para o primeiro item (base)
     
     # Ordenar cores para um layout consistente (ex: alfabético)
     sorted_colors = sorted(organized_dxfs.keys())
@@ -188,14 +186,14 @@ def compor_dxf_personalizado(
                 if not first_dxf_in_group:
                     current_x_dxf += ESPACAMENTO_DXF_MESMO_FURO # Espaçamento entre DXFs do mesmo furo
 
-                # Calcular offset para mover o DXF para a posição atual (current_x_dxf, current_y_dxf)
+                # Calcular offset para mover o DXF para a posição atual (current_x_dxf, current_y_dxf_temp)
                 offset_x = current_x_dxf - original_min_x
-                offset_y = current_y_dxf - original_min_y
+                offset_y = current_y_dxf_temp - original_min_y
 
                 temp_item_positions.append({
                     'entities': entities,
                     'pos_x': current_x_dxf,
-                    'pos_y': current_y_dxf,
+                    'pos_y': current_y_dxf_temp,
                     'width': bbox_width,
                     'height': bbox_height,
                     'offset_x': offset_x,
@@ -212,7 +210,7 @@ def compor_dxf_personalizado(
             for dxf_item in color_group[hole_type]:
                 max_height_in_color_line = max(max_height_in_color_line, dxf_item['bbox_height'])
         
-        current_y_dxf += max_height_in_color_line + ESPACAMENTO_LINHA_COR
+        current_y_dxf_temp += max_height_in_color_line + ESPACAMENTO_LINHA_COR
 
     # --- 4. Ajustar Posições Finais e Inserir no DXF ---
     
@@ -274,8 +272,11 @@ def compor_dxf_personalizado(
 
     # --- 5. Salvar DXF ---
     # Nome do arquivo de saída
-    timestamp = datetime.datetime.now().strftime("%d-%m-%Y_%H%M%S")
-    output_dxf_name = f"Plano de corte {plan_name} {timestamp}.dxf"
+    if output_filename:
+        output_dxf_name = output_filename
+    else:
+        timestamp = datetime.datetime.now().strftime("%d-%m-%Y_%H%M%S")
+        output_dxf_name = f"Plano de corte {plan_name} {timestamp}.dxf"
 
     # Caminho temporário para salvar localmente antes do upload
     caminho_saida_dxf = f"/tmp/{output_dxf_name}"
