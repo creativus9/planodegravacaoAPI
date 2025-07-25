@@ -3,6 +3,7 @@ import ezdxf
 import re
 import datetime
 from collections import defaultdict
+from typing import Optional # Importa Optional
 
 # Importa as funções utilitárias e de Google Drive
 from dxf_utils import parse_sku, calcular_bbox_dxf
