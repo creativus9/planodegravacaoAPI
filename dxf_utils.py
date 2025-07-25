@@ -10,12 +10,14 @@ def parse_sku(sku: str):
     parts = sku.split('-')
     if len(parts) != 7:
         print(f"[WARN] SKU '{sku}' não está no formato esperado (7 grupos).")
-        return None, None # Retorna None se o formato não for o esperado
+        # Retorna None para formato, furo, cor se o formato não for o esperado
+        return None, None, None 
 
+    format_code = parts[0] # Novo: Grupo 1: formato
     hole_type = parts[2] # Grupo 3: tipo de furo
     color_code = parts[4] # Grupo 5: código da cor
 
-    return hole_type, color_code
+    return format_code, hole_type, color_code
 
 def calcular_bbox_dxf(msp):
     """
