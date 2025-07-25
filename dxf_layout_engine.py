@@ -59,7 +59,8 @@ def compor_dxf_personalizado(
     # --- 1. Baixar e Organizar DXFs de Itens ---
     print("[INFO] Baixando e organizando DXFs de itens...")
     for item_data in file_ids_and_skus:
-        file_id = item_data['file_id']
+        # CORREÇÃO AQUI: Usar 'id_arquivo_drive' em vez de 'file_id'
+        file_id = item_data['id_arquivo_drive'] 
         sku = item_data['sku']
         
         hole_type, color_code = parse_sku(sku)
