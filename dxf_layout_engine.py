@@ -1,13 +1,28 @@
+# dxf_layout_engine.py
 import os
 import ezdxf
 import re
 import datetime
 from collections import defaultdict
-from typing import Optional, List, Tuple, Any # Adiciona List, Tuple, Any
+from typing import Optional, List, Tuple, Any
+
+# Adicionando prints para depuração
+print("DEBUG: dxf_layout_engine.py - Início do carregamento do módulo.")
 
 # Importa as funções utilitárias e de Google Drive
-from dxf_utils import parse_sku, calcular_bbox_dxf
-from google_drive_utils import baixar_arquivo_drive, upload_to_drive, buscar_arquivo_personalizado_por_id_e_sku # Importa buscar_arquivo_personalizado_por_id_e_sku
+try:
+    from dxf_utils import parse_sku, calcular_bbox_dxf
+    print("DEBUG: dxf_layout_engine.py - dxf_utils importado com sucesso.")
+except ImportError as e:
+    print(f"ERROR: dxf_layout_engine.py - Falha ao importar dxf_utils: {e}")
+    raise # Re-levanta o erro para que o traceback seja claro
+
+try:
+    from google_drive_utils import baixar_arquivo_drive, upload_to_drive, buscar_arquivo_personalizado_por_id_e_sku
+    print("DEBUG: dxf_layout_engine.py - google_drive_utils importado com sucesso.")
+except ImportError as e:
+    print(f"ERROR: dxf_layout_engine.py - Falha ao importar google_drive_utils: {e}")
+    raise # Re-levanta o erro para que o traceback seja claro
 
 # --- Configurações de Layout (em mm) ---
 # Tamanho da folha de corte (exemplo: A0 ou um tamanho personalizado)
@@ -15,7 +30,7 @@ FOLHA_LARGURA_MM, FOLHA_ALTURA_MM = 1200, 900 # Exemplo: 1.2m x 0.9m
 
 # Espaçamentos
 ESPACAMENTO_DXF_MESMO_FURO = 100  # Espaçamento horizontal entre DXFs do mesmo tipo de furo
-ESPACAMENTO_DXF_FURO_DIFERENTE = 200 # Espaçamento horizontal entre grupos de furos diferentes
+# ESPACAMENTO_DXF_FURO_DIFERENTE = 200 # Espaçamento horizontal entre grupos de furos diferentes (Substituído pela barra)
 ESPACAMENTO_LINHA_COR = 200       # Espaçamento vertical entre linhas de cores diferentes
 ESPACAMENTO_PLANO_COR = 100       # Espaçamento vertical entre o DXF do plano e a primeira linha de cor
 
@@ -32,6 +47,59 @@ PLANO_DXF_FIXED_HEIGHT_MM = 21.5
 ITEM_DXF_FIXED_WIDTH_MM = 129.0
 ITEM_DXF_FIXED_HEIGHT_MM = 225.998
 
+# --- Configurações da Barra Separadora ---
+BARRA_DXF_PATH = os.path.join("Plano_Info", "Barra.dxf")
+BARRA_DXF_FIXED_WIDTH_MM = 10.0
+BARRA_DXF_FIXED_HEIGHT_MM = 250.0
+ESPACAMENTO_SEPARADOR = 100 # Espaçamento de 100mm antes e depois da barra
+
+# Variável global para armazenar as entidades da barra
+barra_entities = []
+barra_width = BARRA_DXF_FIXED_WIDTH_MM
+barra_height = BARRA_DXF_FIXED_HEIGHT_MM
+barra_original_min_x, barra_original_min_y = 0.0, 0.0
+
+print("DEBUG: dxf_layout_engine.py - Variáveis globais e constantes definidas.")
+
+def load_barra_dxf():
+    """Carrega as entidades do Barra.dxf uma vez."""
+    global barra_entities, barra_width, barra_height, barra_original_min_x, barra_original_min_y
+    print("DEBUG: load_barra_dxf() - Chamado.")
+    if not barra_entities: # Carrega apenas se ainda não foi carregado
+        print(f"DEBUG: load_barra_dxf() - Barra DXF não carregada, tentando carregar de '{BARRA_DXF_PATH}'.")
+        if os.path.exists(BARRA_DXF_PATH):
+            try:
+                barra_doc = ezdxf.readfile(BARRA_DXF_PATH)
+                barra_msp = barra_doc.modelspace()
+                
+                min_x_barra, min_y_barra, max_x_barra, max_y_barra = calcular_bbox_dxf(barra_msp)
+                
+                # Fallback para dimensões fixas se bbox for 0x0
+                if (max_x_barra - min_x_barra) == 0.0 and (max_y_barra - min_y_barra) == 0.0:
+                    print(f"[WARN] Dimensões de Barra.dxf calculadas como 0x0. Usando dimensões fixas: {BARRA_DXF_FIXED_WIDTH_MM}x{BARRA_DXF_FIXED_HEIGHT_MM} mm.")
+                    barra_width = BARRA_DXF_FIXED_WIDTH_MM
+                    barra_height = BARRA_DXF_FIXED_HEIGHT_MM
+                    barra_original_min_x, barra_original_min_y = 0.0, 0.0
+                else:
+                    barra_width = max_x_barra - min_x_barra
+                    barra_height = max_y_barra - min_y_barra
+                    barra_original_min_x, barra_original_min_y = min_x_barra, min_y_barra
+
+                for ent in barra_msp:
+                    barra_entities.append(ent.copy())
+                print(f"[INFO] Barra.dxf carregado. Dimensões: {barra_width:.2f}x{barra_height:.2f} mm")
+            except ezdxf.DXFStructureError as e:
+                print(f"[ERROR] Arquivo DXF '{BARRA_DXF_PATH}' corrompido ou inválido: {e}")
+                barra_entities = []
+            except Exception as e:
+                print(f"[ERROR] Erro ao carregar DXF '{BARRA_DXF_PATH}': {e}")
+                barra_entities = []
+        else:
+            print(f"[WARN] Barra.dxf não encontrado em '{BARRA_DXF_PATH}'. Separadores não serão inseridos.")
+    else:
+        print("DEBUG: load_barra_dxf() - Barra DXF já carregada.")
+
+print("DEBUG: dxf_layout_engine.py - load_barra_dxf() definida.")
 
 def generate_single_plan_layout_data(
     file_ids_and_skus: list[dict],
@@ -54,15 +122,19 @@ def generate_single_plan_layout_data(
         - A largura total do layout do plano.
         - A altura total do layout do plano.
     """
+    print(f"DEBUG: generate_single_plan_layout_data() - Chamado para plano '{plan_name}'.")
     
+    # Carrega a barra DXF se ainda não foi carregada
+    load_barra_dxf()
+
     # Usaremos um documento temporário para calcular as posições relativas
     # e depois copiaremos as entidades para o documento principal no main.py
     temp_doc = ezdxf.new('R2010') 
     temp_msp = temp_doc.modelspace()
 
-    # Estrutura para organizar os DXFs por cor e furo
-    # { 'DOU': { '2FH': [ {dxf_entity, original_sku, bbox_width, bbox_height, original_min_x, original_min_y}, ... ] } }
-    organized_dxfs = defaultdict(lambda: defaultdict(list))
+    # Estrutura para organizar os DXFs por cor, formato, tamanho e furo
+    # { 'DOU': { 'PLAC': { '3010': { '2FH': [ {dxf_entity, original_sku, bbox_width, bbox_height, original_min_x, original_min_y}, ... ] } } } }
+    organized_dxfs = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list))))
     
     # --- 1. Baixar e Organizar DXFs de Itens ---
     print(f"[INFO] Baixando e organizando DXFs de itens para o plano '{plan_name}'...")
@@ -70,17 +142,23 @@ def generate_single_plan_layout_data(
         target_id_from_sheet = item_data['id_arquivo_drive'] 
         sku = item_data['sku']
         
-        hole_type, color_code = parse_sku(sku)
-        if not hole_type or not color_code:
-            print(f"[WARN] SKU '{sku}' inválido, ignorando item.")
+        print(f"DEBUG: Processing SKU: {sku}")
+        dxf_format, dxf_size, hole_type, color_code = parse_sku(sku)
+        print(f"DEBUG: parse_sku returned: format={dxf_format}, size={dxf_size}, hole={hole_type}, color={color_code}")
+
+        if not dxf_format or not dxf_size or not hole_type or not color_code:
+            print(f"[WARN] SKU '{sku}' inválido ou incompleto, ignorando item.")
             continue
 
         try:
-            real_file_id, nome_arquivo_drive = buscar_arquivo_personalizado_por_id_e_sku(
+            print(f"DEBUG: Calling buscar_arquivo_personalizado_por_id_e_sku for target_id={target_id_from_sheet}, sku={sku}")
+            result_from_search = buscar_arquivo_personalizado_por_id_e_sku(
                 target_id=target_id_from_sheet,
                 sku=sku,
                 drive_folder_id=drive_folder_id
             )
+            print(f"DEBUG: buscar_arquivo_personalizado_por_id_e_sku returned: {result_from_search}")
+            real_file_id, nome_arquivo_drive = result_from_search
             print(f"[INFO] Arquivo encontrado no Drive: ID real='{real_file_id}', Nome='{nome_arquivo_drive}'")
         except FileNotFoundError as e:
             print(f"[ERROR] Falha ao encontrar arquivo no Drive para ID lógico '{target_id_from_sheet}' e SKU '{sku}': {e}")
@@ -117,7 +195,7 @@ def generate_single_plan_layout_data(
             for entity in item_msp:
                 entities_to_add.append(entity.copy()) # Copia para evitar referências ao doc original
 
-            organized_dxfs[color_code][hole_type].append({
+            organized_dxfs[color_code][dxf_format][dxf_size][hole_type].append({
                 'entities': entities_to_add,
                 'sku': sku,
                 'bbox_width': dxf_width,
@@ -125,7 +203,7 @@ def generate_single_plan_layout_data(
                 'original_min_x': min_x,
                 'original_min_y': min_y
             })
-            print(f"[INFO] DXF para SKU '{sku}' (cor: {color_code}, furo: {hole_type}) processado. Dimensões: {dxf_width:.2f}x{dxf_height:.2f} mm")
+            print(f"[INFO] DXF para SKU '{sku}' (cor: {color_code}, formato: {dxf_format}, tamanho: {dxf_size}, furo: {hole_type}) processado. Dimensões: {dxf_width:.2f}x{dxf_height:.2f} mm")
 
         except ezdxf.DXFStructureError as e:
             print(f"[ERROR] Arquivo DXF '{dxf_path_local}' corrompido ou inválido: {e}")
@@ -181,23 +259,7 @@ def generate_single_plan_layout_data(
     # ao canto inferior esquerdo do layout deste plano (que será (0,0) após o ajuste final)
     all_relative_entities_with_coords = []
 
-    # current_y_cursor: Representa a coordenada Y do TOPO do próximo elemento a ser posicionado
-    # Começamos do topo do layout relativo, que será ajustado para (0,0) no final.
-    # Por enquanto, assumimos que o layout pode crescer para cima a partir de um "piso" 0.
-    # A altura total será calculada no final.
-    
-    # A lógica de posicionamento será de cima para baixo, então o "topo" inicial é a altura máxima esperada
-    # para este plano, que será ajustada.
-    
-    # Para simplificar o cálculo do bbox final, vamos posicionar tudo como se o canto inferior esquerdo
-    # do layout final fosse (0,0). Isso significa que as coordenadas Y serão positivas.
-    # current_y_cursor será a coordenada Y do canto inferior esquerdo da PRÓXIMA linha a ser inserida.
-    
-    # Primeiro, determinamos a altura total necessária para este plano.
-    # Isso é um pouco complexo porque a altura depende do conteúdo.
-    # Vamos fazer uma primeira passagem "virtual" para calcular a altura.
-
-    # Altura total estimada para o layout deste plano
+    # Altura total estimada para o layout deste plano (primeira passagem para estimar altura)
     estimated_layout_height = 0
     if plano_entities:
         estimated_layout_height += plano_height + ESPACAMENTO_PLANO_COR
@@ -206,13 +268,24 @@ def generate_single_plan_layout_data(
     for color_code in sorted(organized_dxfs.keys()):
         color_group = organized_dxfs[color_code]
         max_height_in_color_line = 0
-        for hole_type in color_group:
-            for dxf_item in color_group[hole_type]:
-                max_height_in_color_line = max(max_height_in_color_line, dxf_item['bbox_height'])
-        estimated_layout_height += max_height_in_color_line + ESPACAMENTO_LINHA_COR
+        
+        if barra_entities: # Considera a altura da barra se ela for inserida
+            max_height_in_color_line = max(max_height_in_color_line, barra_height)
+
+        for dxf_format in sorted(color_group.keys()):
+            format_group = color_group[dxf_format]
+            for dxf_size in sorted(format_group.keys()):
+                size_group = format_group[dxf_size]
+                for hole_type in size_group.keys():
+                    for dxf_item in size_group[hole_type]:
+                        max_height_in_color_line = max(max_height_in_color_line, dxf_item['bbox_height'])
+        
+        # Se houver itens nesta linha de cor, adiciona a altura máxima e o espaçamento da linha de cor
+        if max_height_in_color_line > 0:
+            estimated_layout_height += max_height_in_color_line + ESPACAMENTO_LINHA_COR
     
     # Remove o último espaçamento de linha de cor, pois não há próxima linha
-    if organized_dxfs:
+    if organized_dxfs and estimated_layout_height > 0:
         estimated_layout_height -= ESPACAMENTO_LINHA_COR
     
     # Se não houver itens nem plano, definimos uma altura mínima para evitar 0
@@ -220,14 +293,10 @@ def generate_single_plan_layout_data(
         estimated_layout_height = 1 # Altura mínima para um layout vazio
 
     # Agora, posicionamos os elementos de cima para baixo.
-    # current_y_pos_for_new_row: A coordenada Y do canto inferior esquerdo da próxima "linha" de elementos.
-    # Começa na altura total estimada menos a margem inferior (se houver, mas aqui é relativo a 0,0)
     current_y_pos_for_new_row = estimated_layout_height - MARGEM_INFERIOR # Começa do topo do espaço disponível
 
     # Inserir o DXF do plano de corte no topo, se houver
     if plano_entities:
-        # A posição Y para o canto inferior esquerdo do bloco do plano
-        # é o cursor atual menos a altura do plano
         plano_insert_y = current_y_pos_for_new_row - plano_height
         
         offset_x_plano = MARGEM_ESQUERDA - plano_original_min_x
@@ -240,7 +309,6 @@ def generate_single_plan_layout_data(
         
         print(f"[DEBUG] Plano de corte '{plan_name}.dxf' inserido em X:{MARGEM_ESQUERDA:.2f}, Y:{plano_insert_y:.2f} (relativo).")
         
-        # Atualiza o cursor Y para o próximo elemento (abaixo do plano + espaçamento)
         current_y_pos_for_new_row = plano_insert_y - ESPACAMENTO_PLANO_COR
         print(f"[DEBUG] Cursor Y após plano de corte: {current_y_pos_for_new_row:.2f} mm (abaixo do plano + espaçamento)")
     else:
@@ -256,57 +324,118 @@ def generate_single_plan_layout_data(
         
         # Encontra a altura máxima dos DXFs nesta linha de cor para determinar o avanço vertical
         max_height_in_color_line = 0
-        for hole_type in color_group:
-            for dxf_item in color_group[hole_type]:
-                max_height_in_color_line = max(max_height_in_color_line, dxf_item['bbox_height'])
+        if barra_entities:
+            max_height_in_color_line = max(max_height_in_color_line, barra_height)
+
+        for dxf_format in sorted(color_group.keys()):
+            format_group = color_group[dxf_format]
+            for dxf_size in sorted(format_group.keys()):
+                size_group = format_group[dxf_size]
+                for hole_type in size_group.keys():
+                    for dxf_item in size_group[hole_type]:
+                        max_height_in_color_line = max(max_height_in_color_line, dxf_item['bbox_height'])
 
         # A posição Y para esta linha de cor (canto inferior esquerdo dos itens)
-        # current_y_pos_for_new_row já está no topo da linha atual, então subtraímos a altura máxima da linha
         row_base_y = current_y_pos_for_new_row - max_height_in_color_line
         print(f"[DEBUG] Iniciando linha de cor '{color_code}'. Altura máx na linha: {max_height_in_color_line:.2f} mm. Base Y da linha: {row_base_y:.2f} mm")
         
-        # Ordenar tipos de furo para um layout consistente
-        sorted_hole_types = sorted(color_group.keys())
+        sorted_formats = sorted(color_group.keys())
+        first_format_in_line = True
+        for dxf_format in sorted_formats:
+            format_group = color_group[dxf_format]
 
-        first_hole_type_in_line = True
-        for hole_type in sorted_hole_types:
-            hole_type_group = color_group[hole_type]
+            if not first_format_in_line:
+                # Inserir separador antes de um novo formato
+                if barra_entities:
+                    current_x_pos += ESPACAMENTO_SEPARADOR
+                    offset_x_barra = current_x_pos - barra_original_min_x
+                    # A barra deve estar alinhada com a base da linha de itens, ou um pouco acima se for mais alta
+                    offset_y_barra = row_base_y - barra_original_min_y 
+                    
+                    for ent in barra_entities:
+                        new_ent = ent.copy()
+                        new_ent.translate(offset_x_barra, offset_y_barra, 0)
+                        all_relative_entities_with_coords.append((new_ent, new_ent.dxf.insert.x if hasattr(new_ent.dxf, 'insert') else offset_x_barra, new_ent.dxf.insert.y if hasattr(new_ent.dxf, 'insert') else offset_y_barra))
+                    print(f"[DEBUG] Barra.dxf inserida antes do formato '{dxf_format}' em X:{current_x_pos:.2f}.")
+                    current_x_pos += barra_width + ESPACAMENTO_SEPARADOR # Avança X pela largura da barra + espaçamento
+                else:
+                    current_x_pos += ESPACAMENTO_DXF_MESMO_FURO # Fallback se a barra não for carregada
+                print(f"[DEBUG] Avançando X para novo formato '{dxf_format}': {current_x_pos:.2f} mm")
             
-            if not first_hole_type_in_line:
-                current_x_pos += ESPACAMENTO_DXF_FURO_DIFERENTE # Espaçamento entre grupos de furos
-                print(f"[DEBUG] Avançando X para novo grupo de furo '{hole_type}': {current_x_pos:.2f} mm")
-            
-            # Ordenar DXFs dentro do grupo de furo (opcional, mas bom para consistência)
-            sorted_hole_type_dxfs = sorted(hole_type_group, key=lambda x: x['sku'])
+            sorted_sizes = sorted(format_group.keys())
+            first_size_in_format = True
+            for dxf_size in sorted_sizes:
+                size_group = format_group[dxf_size]
 
-            first_dxf_in_group = True
-            for dxf_item in sorted_hole_type_dxfs:
-                entities = dxf_item['entities']
-                sku = dxf_item['sku']
-                bbox_width = dxf_item['bbox_width']
-                bbox_height = dxf_item['bbox_height']
-                original_min_x = dxf_item['original_min_x']
-                original_min_y = dxf_item['original_min_y']
+                if not first_size_in_format:
+                    # Inserir separador antes de um novo tamanho
+                    if barra_entities:
+                        current_x_pos += ESPACAMENTO_SEPARADOR
+                        offset_x_barra = current_x_pos - barra_original_min_x
+                        offset_y_barra = row_base_y - barra_original_min_y
+                        for ent in barra_entities:
+                            new_ent = ent.copy()
+                            new_ent.translate(offset_x_barra, offset_y_barra, 0)
+                            all_relative_entities_with_coords.append((new_ent, new_ent.dxf.insert.x if hasattr(new_ent.dxf, 'insert') else offset_x_barra, new_ent.dxf.insert.y if hasattr(new_ent.dxf, 'insert') else offset_y_barra))
+                        print(f"[DEBUG] Barra.dxf inserida antes do tamanho '{dxf_size}' em X:{current_x_pos:.2f}.")
+                        current_x_pos += barra_width + ESPACAMENTO_SEPARADOR
+                    else:
+                        current_x_pos += ESPACAMENTO_DXF_MESMO_FURO
+                    print(f"[DEBUG] Avançando X para novo tamanho '{dxf_size}': {current_x_pos:.2f} mm")
 
-                if not first_dxf_in_group:
-                    current_x_pos += ESPACAMENTO_DXF_MESMO_FURO # Espaçamento entre DXFs do mesmo furo
-                    print(f"[DEBUG] Avançando X para próximo DXF no grupo: {current_x_pos:.2f} mm")
+                sorted_hole_types = sorted(size_group.keys())
+                first_hole_type_in_size = True
+                for hole_type in sorted_hole_types:
+                    hole_type_group = size_group[hole_type]
+                    
+                    if not first_hole_type_in_size:
+                        # Inserir separador antes de um novo tipo de furo
+                        if barra_entities:
+                            current_x_pos += ESPACAMENTO_SEPARADOR
+                            offset_x_barra = current_x_pos - barra_original_min_x
+                            offset_y_barra = row_base_y - barra_original_min_y
+                            for ent in barra_entities:
+                                new_ent = ent.copy()
+                                new_ent.translate(offset_x_barra, offset_y_barra, 0)
+                                all_relative_entities_with_coords.append((new_ent, new_ent.dxf.insert.x if hasattr(new_ent.dxf, 'insert') else offset_x_barra, new_ent.dxf.insert.y if hasattr(new_ent.dxf, 'insert') else offset_y_barra))
+                            print(f"[DEBUG] Barra.dxf inserida antes do furo '{hole_type}' em X:{current_x_pos:.2f}.")
+                            current_x_pos += barra_width + ESPACAMENTO_SEPARADOR
+                        else:
+                            current_x_pos += ESPACAMENTO_DXF_MESMO_FURO
+                        print(f"[DEBUG] Avançando X para novo grupo de furo '{hole_type}': {current_x_pos:.2f} mm")
+                    
+                    # Ordenar DXFs dentro do grupo de furo (opcional, mas bom para consistência)
+                    sorted_hole_type_dxfs = sorted(hole_type_group, key=lambda x: x['sku'])
 
-                # Calcular offset para mover o DXF para a posição atual (current_x_pos, row_base_y)
-                # O ponto de referência para a inserção é o canto inferior esquerdo do bbox do DXF
-                offset_x = current_x_pos - original_min_x
-                offset_y = row_base_y - original_min_y # Usar row_base_y para alinhar a base da linha
+                    first_dxf_in_group = True
+                    for dxf_item in sorted_hole_type_dxfs:
+                        entities = dxf_item['entities']
+                        sku = dxf_item['sku']
+                        bbox_width = dxf_item['bbox_width']
+                        bbox_height = dxf_item['bbox_height']
+                        original_min_x = dxf_item['original_min_x']
+                        original_min_y = dxf_item['original_min_y']
 
-                for ent in entities:
-                    new_ent = ent.copy()
-                    new_ent.translate(offset_x, offset_y, 0)
-                    all_relative_entities_with_coords.append((new_ent, new_ent.dxf.insert.x if hasattr(new_ent.dxf, 'insert') else offset_x, new_ent.dxf.insert.y if hasattr(new_ent.dxf, 'insert') else offset_y))
-                
-                print(f"[DEBUG] Item '{sku}' inserido em X:{current_x_pos:.2f}, Y:{row_base_y:.2f} (relativo).")
-                current_x_pos += bbox_width # Avança X pela largura do DXF
-                first_dxf_in_group = False
-            
-            first_hole_type_in_line = False
+                        if not first_dxf_in_group:
+                            current_x_pos += ESPACAMENTO_DXF_MESMO_FURO # Espaçamento entre DXFs do mesmo furo
+                            print(f"[DEBUG] Avançando X para próximo DXF no grupo: {current_x_pos:.2f} mm")
+
+                        # Calcular offset para mover o DXF para a posição atual (current_x_pos, row_base_y)
+                        offset_x = current_x_pos - original_min_x
+                        offset_y = row_base_y - original_min_y # Usar row_base_y para alinhar a base da linha
+
+                        for ent in entities:
+                            new_ent = ent.copy()
+                            new_ent.translate(offset_x, offset_y, 0)
+                            all_relative_entities_with_coords.append((new_ent, new_ent.dxf.insert.x if hasattr(new_ent.dxf, 'insert') else offset_x, new_ent.dxf.insert.y if hasattr(new_ent.dxf, 'insert') else offset_y))
+                        
+                        print(f"[DEBUG] Item '{sku}' inserido em X:{current_x_pos:.2f}, Y:{row_base_y:.2f} (relativo).")
+                        current_x_pos += bbox_width # Avança X pela largura do DXF
+                        first_dxf_in_group = False
+                    
+                    first_hole_type_in_size = False
+                first_size_in_format = False
+            first_format_in_line = False
         
         # Após processar todos os furos para uma cor, avança Y para a próxima linha de cor
         current_y_pos_for_new_row = row_base_y - ESPACAMENTO_LINHA_COR
@@ -316,29 +445,8 @@ def generate_single_plan_layout_data(
     min_x_layout, min_y_layout, max_x_layout, max_y_layout = 0, 0, 0, 0
     
     if all_relative_entities_with_coords:
-        # Para calcular o bbox real, precisamos adicionar as entidades a um temp_msp
-        # e depois calcular o bbox desse modelspace.
-        # Ou, podemos iterar sobre as entidades e seus pontos de inserção já calculados.
-        
-        # Vamos criar um bbox de união para todas as entidades já com suas posições relativas
-        from ezdxf.math import BoundingBox, Vec3
+        from ezdxf.math import BoundingBox
         layout_bbox = BoundingBox()
-
-        for ent, x_pos, y_pos in all_relative_entities_with_coords:
-            # Para entidades complexas como INSERTs, o bbox() já considera a transformação.
-            # Para outras, como LINE, CIRCLE, etc., o bbox() retorna o bbox do objeto em suas próprias coordenadas.
-            # Precisamos transladar esses bboxes para a posição final.
-            try:
-                entity_bbox = ent.bbox()
-                if not entity_bbox.is_empty:
-                    # Translada os pontos do bbox da entidade para sua posição final no layout
-                    # Isso é um pouco mais complexo, pois ent.bbox() retorna o bbox em coordenadas locais.
-                    # Se 'ent' já foi transladado, seus pontos já estão nas coordenadas relativas.
-                    # A forma mais segura é recalcular o bbox do modelspace temporário
-                    # após adicionar todas as entidades a ele.
-                    pass # Faremos isso abaixo
-            except Exception:
-                pass # Ignora entidades que não têm um bbox válido
 
         # Adiciona todas as entidades ao temp_msp para calcular o bbox
         for ent, _, _ in all_relative_entities_with_coords:
@@ -346,19 +454,14 @@ def generate_single_plan_layout_data(
 
         min_x_layout, min_y_layout, max_x_layout, max_y_layout = calcular_bbox_dxf(temp_msp)
 
-        # Se o bbox ainda for 0,0,0,0, e houver entidades, significa um problema no cálculo do bbox
         if min_x_layout == max_x_layout and min_y_layout == max_y_layout and len(all_relative_entities_with_coords) > 0:
             print("[WARN] Bounding box final do layout do plano ainda é 0x0. Pode haver entidades sem geometria.")
-            # Fallback para uma dimensão mínima se o bbox for degenerado
             layout_width = MARGEM_ESQUERDA * 2 + 100 # Exemplo de largura mínima
             layout_height = estimated_layout_height # Usa a altura estimada
-            # Não há ajuste para (0,0) se não houver bbox real
             
-            # Retorna as entidades como estão, sem ajuste de offset, e as dimensões estimadas
             return [(ent, x, y) for ent, x, y in all_relative_entities_with_coords], layout_width, layout_height
             
     else:
-        # Se não houver entidades, o layout tem 0 de largura e altura
         print("[INFO] Nenhum item ou plano para o layout. Retornando layout vazio.")
         return [], 0.0, 0.0
 
@@ -378,3 +481,5 @@ def generate_single_plan_layout_data(
     print(f"[INFO] Layout do plano '{plan_name}' gerado. Dimensões: {layout_width:.2f}x{layout_height:.2f} mm")
     return final_entities_with_coords, layout_width, layout_height
 
+print("DEBUG: dxf_layout_engine.py - generate_single_plan_layout_data() definida.")
+print("DEBUG: dxf_layout_engine.py - Fim do carregamento do módulo.")
