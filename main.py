@@ -1,11 +1,10 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional, Dict # Adicionado Dict para tipagem
+from typing import List, Optional, Dict
 
 # Importações das funções de composição DXF e de interação com o Google Drive
-# Renomeado dxf_layout_engine para dxf_composer conforme o último Canvas
-from dxf_composer import compor_dxf_personalizado
+from dxf_layout_engine import compor_dxf_personalizado # Importação corrigida
 from google_drive_utils import upload_to_drive, mover_arquivos_antigos, buscar_arquivo_personalizado_por_id_e_sku
 
 app = FastAPI()
@@ -63,9 +62,9 @@ class EntradaComposicao(BaseModel):
 @app.post("/compor-plano")
 async def compor_plano(entrada: EntradaComposicao):
     """
-    Endpoint para compor um novo arquivo DXF e um PNG de visualização
+    Endpoint para compor um novo arquivo DXF
     baseado nos múltiplos planos e itens fornecidos.
-    Os arquivos resultantes são enviados para o Google Drive.
+    O arquivo resultante é enviado para o Google Drive.
     """
     if not entrada.plans:
         raise HTTPException(status_code=400, detail="Nenhum plano fornecido para composição.")
@@ -78,40 +77,31 @@ async def compor_plano(entrada: EntradaComposicao):
 
     try:
         # Chama a função principal de composição
-        # Agora passa a lista completa de planos
-        caminho_dxf_saida, caminho_png_saida = compor_dxf_personalizado(
+        # Agora passa a lista completa de planos e espera apenas o caminho do DXF
+        caminho_dxf_saida = compor_dxf_personalizado(
             plans=[plan.model_dump() for plan in entrada.plans], # Passa como lista de dicionários
             drive_folder_id=entrada.id_pasta_entrada_drive, # Usa a pasta de entrada para baixar
             output_filename=entrada.output_filename # Passa o nome de arquivo opcional
         )
 
-        # Faz o upload dos arquivos gerados para o Google Drive
+        # Faz o upload do arquivo DXF gerado para o Google Drive
         url_dxf = upload_to_drive(
             caminho_dxf_saida,
             os.path.basename(caminho_dxf_saida), # Usa o nome base do arquivo salvo localmente
             "application/dxf",
             entrada.id_pasta_saida_drive # Usa a pasta de saída para fazer upload
         )
-        url_png = upload_to_drive(
-            caminho_png_saida,
-            os.path.basename(caminho_png_saida), # Usa o nome base do arquivo salvo localmente
-            "image/png",
-            entrada.id_pasta_saida_drive # Usa a pasta de saída para fazer upload
-        )
-
-        # Limpa os arquivos temporários após o upload
+        
+        # Limpa o arquivo temporário após o upload
         if os.path.exists(caminho_dxf_saida):
             os.remove(caminho_dxf_saida)
             print(f"[INFO] Arquivo temporário DXF removido: {caminho_dxf_saida}")
-        if os.path.exists(caminho_png_saida):
-            os.remove(caminho_png_saida)
-            print(f"[INFO] Arquivo temporário PNG removido: {caminho_png_saida}")
 
         print(f"[INFO] Composição concluída com sucesso.")
         return {
-            "message": "Plano(s) de corte DXF e PNG composto(s) e enviado(s) ao Google Drive com sucesso!",
+            "message": "Plano(s) de corte DXF composto(s) e enviado(s) ao Google Drive com sucesso!",
             "dxf_url": url_dxf,
-            "png_url": url_png
+            # PNG URL removida
         }
 
     except FileNotFoundError as e:
