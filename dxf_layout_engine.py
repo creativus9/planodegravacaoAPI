@@ -25,8 +25,10 @@ except ImportError as e:
     raise # Re-levanta o erro para que o traceback seja claro
 
 # --- Exceção Customizada ---
+# Esta exceção agora será levantada apenas se NENHUMA entidade válida for gerada para um plano.
+# Falhas em itens individuais serão reportadas na lista de retorno.
 class NoEntitiesFoundError(Exception):
-    """Exceção levantada quando nenhum DXF válido é encontrado para gerar o layout."""
+    """Exceção levantada quando nenhum DXF válido é encontrado para gerar o layout de um plano."""
     pass
 # --- Fim da Exceção Customizada ---
 
@@ -117,7 +119,7 @@ def generate_single_plan_layout_data(
     file_ids_and_skus: list[dict],
     plan_name: str,
     drive_folder_id: str,
-) -> Tuple[List[Tuple[Any, float, float]], float, float]:
+) -> Tuple[List[Tuple[Any, float, float]], float, float, List[str]]: # Retorna List[str] para failed_ids
     """
     Gera as entidades DXF e suas posições relativas para o layout de um único plano de corte,
     assumindo que o canto inferior esquerdo do layout final será (0,0).
@@ -133,6 +135,7 @@ def generate_single_plan_layout_data(
         - Uma lista de tuplas: (entidade ezdxf copiada, x_pos_relativa, y_pos_relativa)
         - A largura total do layout do plano.
         - A altura total do layout do plano.
+        - Uma lista dos 'id_arquivo_drive' que falharam ao serem processados.
     """
     print(f"DEBUG: generate_single_plan_layout_data() - Chamado para plano '{plan_name}'.")
     
@@ -148,18 +151,21 @@ def generate_single_plan_layout_data(
     # { 'DOU': { 'PLAC': { '3010': { '2FH': [ {dxf_entity, original_sku, bbox_width, bbox_height, original_min_x, original_min_y}, ... ] } } } }
     organized_dxfs = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list))))
     
+    failed_ids_current_plan = [] # Nova lista para IDs de arquivos que falharam neste plano
+
     # --- 1. Baixar e Organizar DXFs de Itens ---
     print(f"[INFO] Baixando e organizando DXFs de itens para o plano '{plan_name}'...")
     for item_data in file_ids_and_skus:
         target_id_from_sheet = item_data['id_arquivo_drive'] 
         sku = item_data['sku']
         
-        print(f"DEBUG: Processing SKU: {sku}")
+        print(f"DEBUG: Processing SKU: {sku} (ID: {target_id_from_sheet})")
         dxf_format, dxf_size, hole_type, color_code = parse_sku(sku)
         print(f"DEBUG: parse_sku returned: format={dxf_format}, size={dxf_size}, hole={hole_type}, color={color_code}")
 
         if not dxf_format or not dxf_size or not hole_type or not color_code:
-            print(f"[WARN] SKU '{sku}' inválido ou incompleto, ignorando item.")
+            print(f"[WARN] SKU '{sku}' (ID: {target_id_from_sheet}) inválido ou incompleto, ignorando item e adicionando ID a falhas.")
+            failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
             continue
 
         try:
@@ -173,17 +179,20 @@ def generate_single_plan_layout_data(
             real_file_id, nome_arquivo_drive = result_from_search
             print(f"[INFO] Arquivo encontrado no Drive: ID real='{real_file_id}', Nome='{nome_arquivo_drive}'")
         except FileNotFoundError as e:
-            print(f"[ERROR] Falha ao encontrar arquivo no Drive para ID lógico '{target_id_from_sheet}' e SKU '{sku}': {e}")
+            print(f"[ERROR] Falha ao encontrar arquivo no Drive para ID lógico '{target_id_from_sheet}' e SKU '{sku}': {e}. Adicionando ID a falhas.")
+            failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
             continue
         except Exception as e:
-            print(f"[ERROR] Erro inesperado ao buscar arquivo no Drive para ID lógico '{target_id_from_sheet}' e SKU '{sku}': {e}")
+            print(f"[ERROR] Erro inesperado ao buscar arquivo no Drive para ID lógico '{target_id_from_sheet}' e SKU '{sku}': {e}. Adicionando ID a falhas.")
+            failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
             continue
 
         local_dxf_name = f"{sku}.dxf"
         try:
             dxf_path_local = baixar_arquivo_drive(real_file_id, local_dxf_name, drive_folder_id)
         except Exception as e:
-            print(f"[ERROR] Falha ao baixar DXF para SKU '{sku}' (ID real: {real_file_id}): {e}")
+            print(f"[ERROR] Falha ao baixar DXF para SKU '{sku}' (ID real: {real_file_id}): {e}. Adicionando ID a falhas.")
+            failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
             continue
 
         try:
@@ -196,7 +205,7 @@ def generate_single_plan_layout_data(
 
             # --- Fallback para dimensões fixas se bbox for 0x0 (Adicionado) ---
             if dxf_width == 0.0 and dxf_height == 0.0:
-                print(f"[WARN] Dimensões de SKU '{sku}' calculadas como 0x0. Usando dimensões fixas: {ITEM_DXF_FIXED_WIDTH_MM}x{ITEM_DXF_FIXED_HEIGHT_MM} mm.")
+                print(f"[WARN] Dimensões de SKU '{sku}' (ID: {target_id_from_sheet}) calculadas como 0x0. Usando dimensões fixas: {ITEM_DXF_FIXED_WIDTH_MM}x{ITEM_DXF_FIXED_HEIGHT_MM} mm.")
                 dxf_width = ITEM_DXF_FIXED_WIDTH_MM
                 dxf_height = ITEM_DXF_FIXED_HEIGHT_MM
                 # Para o offset, assumimos que o ponto de origem do desenho é (0,0) se não houver bbox válido
@@ -207,20 +216,28 @@ def generate_single_plan_layout_data(
             for entity in item_msp:
                 entities_to_add.append(entity.copy()) # Copia para evitar referências ao doc original
 
+            if not entities_to_add: # Se o DXF foi lido mas não tem entidades visíveis
+                print(f"[WARN] DXF para SKU '{sku}' (ID: {target_id_from_sheet}) não contém entidades visíveis. Adicionando ID a falhas.")
+                failed_ids_current_plan.append(target_id_from_sheet)
+                continue
+
             organized_dxfs[color_code][dxf_format][dxf_size][hole_type].append({
                 'entities': entities_to_add,
                 'sku': sku,
                 'bbox_width': dxf_width,
                 'bbox_height': dxf_height,
                 'original_min_x': min_x,
-                'original_min_y': min_y
+                'original_min_y': min_y,
+                'id_arquivo_drive': target_id_from_sheet # Adiciona o ID aqui para rastreamento
             })
-            print(f"[INFO] DXF para SKU '{sku}' (cor: {color_code}, formato: {dxf_format}, tamanho: {dxf_size}, furo: {hole_type}) processado. Dimensões: {dxf_width:.2f}x{dxf_height:.2f} mm")
+            print(f"[INFO] DXF para SKU '{sku}' (ID: {target_id_from_sheet}, cor: {color_code}, formato: {dxf_format}, tamanho: {dxf_size}, furo: {hole_type}) processado. Dimensões: {dxf_width:.2f}x{dxf_height:.2f} mm")
 
         except ezdxf.DXFStructureError as e:
-            print(f"[ERROR] Arquivo DXF '{dxf_path_local}' corrompido ou inválido: {e}")
+            print(f"[ERROR] Arquivo DXF '{dxf_path_local}' corrompido ou inválido: {e}. Adicionando ID a falhas.")
+            failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
         except Exception as e:
-            print(f"[ERROR] Erro ao processar DXF '{dxf_path_local}': {e}")
+            print(f"[ERROR] Erro ao processar DXF '{dxf_path_local}': {e}. Adicionando ID a falhas.")
+            failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
         finally:
             if os.path.exists(dxf_path_local):
                 os.remove(dxf_path_local)
@@ -257,10 +274,10 @@ def generate_single_plan_layout_data(
             print(f"[INFO] DXF do plano de corte '{plano_info_dxf_path}' carregado. Dimensões: {plano_width:.2f}x{plano_height:.2f} mm")
 
         except ezdxf.DXFStructureError as e:
-            print(f"[ERROR] Arquivo DXF do plano de corte '{plano_info_dxf_path}' corrompido ou inválido: {e}")
+            print(f"[ERROR] Arquivo DXF do plano de corte '{plano_info_dxf_path}' corrompido ou inválido: {e}. Plano não será inserido.")
             plano_entities = [] # Limpa as entidades se houver erro
         except Exception as e:
-            print(f"[ERROR] Erro ao carregar DXF do plano de corte '{plano_info_dxf_path}': {e}")
+            print(f"[ERROR] Erro ao carregar DXF do plano de corte '{plano_info_dxf_path}': {e}. Plano não será inserido.")
             plano_entities = [] # Limpa as entidades se houver erro
     else:
         print(f"[WARN] DXF do plano de corte '{plano_info_dxf_path}' não encontrado localmente. Não será inserido.")
@@ -471,14 +488,17 @@ def generate_single_plan_layout_data(
         min_x_layout, min_y_layout, max_x_layout, max_y_layout = calcular_bbox_dxf(temp_msp)
 
         if min_x_layout == max_x_layout and min_y_layout == max_y_layout and len(all_relative_entities_with_coords) > 0:
-            print("[WARN] Bounding box final do layout do plano ainda é 0x0. Pode haver entidades sem geometria.")
-            # Se o bbox ainda for 0x0, mas há entidades, é um problema de detecção de geometria.
-            # Neste caso, levantamos a exceção para sinalizar que o layout não é válido.
-            raise NoEntitiesFoundError(f"Nenhuma geometria válida encontrada para o plano '{plan_name}'.")
+            print("[WARN] Bounding box final do layout do plano ainda é 0x0. Pode haver entidades sem geometria. Retornando dimensões estimadas.")
+            # Se o bbox ainda for 0x0, mas há entidades, usamos as dimensões estimadas para o layout
+            # e não levantamos NoEntitiesFoundError aqui, pois queremos que o DXF seja gerado (mesmo que com problemas visuais).
+            layout_width = MARGEM_ESQUERDA * 2 + 100 # Exemplo de largura mínima
+            layout_height = estimated_layout_height # Usa a altura estimada
+            return [(ent, x, y) for ent, x, y in all_relative_entities_with_coords], layout_width, layout_height, failed_ids_current_plan
             
     else:
-        print("[INFO] Nenhum item ou plano para o layout. Retornando layout vazio.")
+        print("[INFO] Nenhum item ou plano para o layout. Retornando layout vazio e lista de falhas.")
         # Se não há entidades, o layout é considerado vazio, o que é um cenário de falha para a geração do DXF.
+        # Levantamos a exceção aqui, pois não há nada para desenhar.
         raise NoEntitiesFoundError(f"Nenhum item ou plano válido para o layout do plano '{plan_name}'.")
 
     # Ajustar todas as entidades para que o canto inferior esquerdo do layout seja (0,0)
@@ -495,7 +515,7 @@ def generate_single_plan_layout_data(
     layout_height = max_y_layout - min_y_layout
 
     print(f"[INFO] Layout do plano '{plan_name}' gerado. Dimensões: {layout_width:.2f}x{layout_height:.2f} mm")
-    return final_entities_with_coords, layout_width, layout_height
+    return final_entities_with_coords, layout_width, layout_height, failed_ids_current_plan
 
 print("DEBUG: dxf_layout_engine.py - generate_single_plan_layout_data() definida.")
 print("DEBUG: dxf_layout_engine.py - Fim do carregamento do módulo.")
