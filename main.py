@@ -6,7 +6,7 @@ import os
 import datetime
 
 # Importações das funções de composição DXF e de interação com o Google Drive
-from dxf_layout_engine import compor_dxf_personalizado # Importa do novo arquivo
+from dxf_layout_engine import compor_dxf_personalizado
 from google_drive_utils import upload_to_drive, mover_arquivos_antigos, buscar_arquivo_personalizado_por_id_e_sku
 
 app = FastAPI()
@@ -43,11 +43,13 @@ class EntradaComposicao(BaseModel):
     Define o modelo de dados para a entrada da requisição POST para composição.
     - itens: Lista de objetos ItemEntrada.
     - nome_plano_corte: O nome do plano de corte (ex: "01", "A").
-    - id_pasta_drive: O ID da pasta principal do Google Drive onde os arquivos personalizados estão.
+    - id_pasta_entrada_drive: O ID da pasta do Google Drive de onde os arquivos DXF personalizados são lidos.
+    - id_pasta_saida_drive: O ID da pasta do Google Drive onde o DXF gerado será salvo.
     """
     itens: List[ItemEntrada] = Field(..., min_items=1, description="Lista de itens DXF a serem compostos.")
     nome_plano_corte: str = Field(..., description="Nome do plano de corte (ex: '01', 'A').")
-    id_pasta_drive: str = Field(..., description="ID da pasta principal do Google Drive onde os arquivos DXF personalizados estão.")
+    id_pasta_entrada_drive: str = Field(..., description="ID da pasta do Google Drive de onde os arquivos DXF personalizados são lidos.")
+    id_pasta_saida_drive: str = Field(..., description="ID da pasta do Google Drive onde o DXF gerado será salvo.")
 
 
 @app.post("/compor-plano")
@@ -55,25 +57,33 @@ async def compor_plano(entrada: EntradaComposicao):
     """
     Endpoint para compor um novo arquivo DXF
     baseado nos itens fornecidos, organizando-os por cor e tipo de furo.
-    O arquivo DXF resultante é enviado para o Google Drive.
+    O arquivo DXF resultante é enviado para a pasta de saída especificada no Google Drive.
     """
     if not entrada.itens:
         raise HTTPException(status_code=400, detail="Nenhum item fornecido para composição.")
 
     print(f"[INFO] Iniciando composição do plano: {entrada.nome_plano_corte}")
-    print(f"[INFO] ID da pasta do Drive: {entrada.id_pasta_drive}")
+    print(f"[INFO] ID da pasta de entrada do Drive: {entrada.id_pasta_entrada_drive}")
+    print(f"[INFO] ID da pasta de saída do Drive: {entrada.id_pasta_saida_drive}")
     print(f"[INFO] Total de itens a processar: {len(entrada.itens)}")
 
     try:
         # Chama a função principal de composição
-        caminho_dxf_saida = compor_dxf_personalizado( # Agora retorna apenas o caminho do DXF
-            file_ids_and_skus=[item.model_dump() for item in entrada.itens], # Passa como lista de dicionários
+        # O id_pasta_entrada_drive é usado para baixar os arquivos
+        caminho_dxf_saida = compor_dxf_personalizado(
+            file_ids_and_skus=[item.model_dump() for item in entrada.itens],
             plan_name=entrada.nome_plano_corte,
-            drive_folder_id=entrada.id_pasta_drive
+            drive_folder_id=entrada.id_pasta_entrada_drive # Usa a pasta de entrada para baixar
         )
 
         # Faz o upload do arquivo DXF gerado para o Google Drive
-        url_dxf = upload_to_drive(caminho_dxf_saida, os.path.basename(caminho_dxf_saida), "application/dxf", entrada.id_pasta_drive)
+        # Agora usa id_pasta_saida_drive para o upload
+        url_dxf = upload_to_drive(
+            caminho_dxf_saida,
+            os.path.basename(caminho_dxf_saida),
+            "application/dxf",
+            entrada.id_pasta_saida_drive # Usa a pasta de saída para fazer upload
+        )
 
         # Limpa o arquivo temporário após o upload
         if os.path.exists(caminho_dxf_saida):
