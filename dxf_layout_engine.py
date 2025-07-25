@@ -29,9 +29,9 @@ except ImportError as e:
 FOLHA_LARGURA_MM, FOLHA_ALTURA_MM = 1200, 900 # Exemplo: 1.2m x 0.9m
 
 # Espaçamentos
-ESPACAMENTO_DXF_MESMO_FURO = 100  # Espaçamento horizontal entre DXFs do mesmo tipo de furo
-ESPACAMENTO_LINHA_COR = 200       # Espaçamento vertical entre linhas de cores diferentes
-ESPACAMENTO_PLANO_COR = 100       # Espaçamento vertical entre o DXF do plano e a primeira linha de cor
+ESPACAMENTO_DXF_MESMO_FURO = 100.0  # Espaçamento horizontal entre DXFs do mesmo tipo de furo
+ESPACAMENTO_LINHA_COR = 200.0       # Espaçamento vertical entre linhas de cores diferentes
+ESPACAMENTO_PLANO_COR = 100.0       # Espaçamento vertical entre o DXF do plano e a primeira linha de cor
 
 # Margens da folha
 MARGEM_ESQUERDA = 50
@@ -48,9 +48,16 @@ ITEM_DXF_FIXED_HEIGHT_MM = 225.998
 
 # --- Configurações da Barra Separadora ---
 BARRA_DXF_PATH = os.path.join("Plano_Info", "Barra.dxf")
-BARRA_DXF_FIXED_WIDTH_MM = 10.0  # Alterado para 10.0 (largura)
-BARRA_DXF_FIXED_HEIGHT_MM = 250.0 # Alterado para 250.0 (altura)
-ESPACAMENTO_SEPARADOR = 100 # Espaçamento de 100mm antes e depois da barra
+BARRA_DXF_FIXED_WIDTH_MM = 10.0  # Largura da barra
+BARRA_DXF_FIXED_HEIGHT_MM = 250.0 # Altura da barra
+
+# Novos espaçamentos para a barra
+ESPACAMENTO_SEPARADOR_PRE_BARRA = 100.0 # Espaçamento antes da barra
+ESPACAMENTO_SEPARADOR_POST_BARRA = 100.0 # Espaçamento depois da barra
+
+# Variável de ajuste manual para a distância da barra (pode ser positiva ou negativa)
+# Use esta variável para corrigir pequenas variações na distância percebida da barra.
+ADJUSTMENT_OFFSET_BARRA_MM = 0.0
 
 # Variável global para armazenar as entidades da barra
 barra_entities = []
@@ -347,7 +354,7 @@ def generate_single_plan_layout_data(
                 # Inserir separador antes de um novo formato
                 if barra_entities:
                     print(f"DEBUG: Inserindo Barra.dxf antes do novo formato '{dxf_format}'. current_x_pos antes: {current_x_pos:.2f} mm")
-                    current_x_pos += ESPACAMENTO_SEPARADOR
+                    current_x_pos += ESPACAMENTO_SEPARADOR_PRE_BARRA
                     offset_x_barra = current_x_pos - barra_original_min_x
                     offset_y_barra = row_base_y - barra_original_min_y 
                     
@@ -356,7 +363,7 @@ def generate_single_plan_layout_data(
                         new_ent.translate(offset_x_barra, offset_y_barra, 0)
                         all_relative_entities_with_coords.append((new_ent, new_ent.dxf.insert.x if hasattr(new_ent.dxf, 'insert') else offset_x_barra, new_ent.dxf.insert.y if hasattr(new_ent.dxf, 'insert') else offset_y_barra))
                     print(f"[DEBUG] Barra.dxf inserida em X:{current_x_pos:.2f}, Y:{offset_y_barra:.2f}. Largura da barra: {barra_width:.2f} mm.")
-                    current_x_pos += barra_width + ESPACAMENTO_SEPARADOR # Avança X pela largura da barra + espaçamento
+                    current_x_pos += barra_width + ESPACAMENTO_SEPARADOR_POST_BARRA + ADJUSTMENT_OFFSET_BARRA_MM # Avança X pela largura da barra + espaçamento + ajuste
                 else:
                     current_x_pos += ESPACAMENTO_DXF_MESMO_FURO # Fallback se a barra não for carregada
                 print(f"[DEBUG] current_x_pos após barra (ou fallback) e espaçamento: {current_x_pos:.2f} mm")
@@ -370,7 +377,7 @@ def generate_single_plan_layout_data(
                     # Inserir separador antes de um novo tamanho
                     if barra_entities:
                         print(f"DEBUG: Inserindo Barra.dxf antes do novo tamanho '{dxf_size}'. current_x_pos antes: {current_x_pos:.2f} mm")
-                        current_x_pos += ESPACAMENTO_SEPARADOR
+                        current_x_pos += ESPACAMENTO_SEPARADOR_PRE_BARRA
                         offset_x_barra = current_x_pos - barra_original_min_x
                         offset_y_barra = row_base_y - barra_original_min_y
                         for ent in barra_entities:
@@ -378,7 +385,7 @@ def generate_single_plan_layout_data(
                             new_ent.translate(offset_x_barra, offset_y_barra, 0)
                             all_relative_entities_with_coords.append((new_ent, new_ent.dxf.insert.x if hasattr(new_ent.dxf, 'insert') else offset_x_barra, new_ent.dxf.insert.y if hasattr(new_ent.dxf, 'insert') else offset_y_barra))
                         print(f"[DEBUG] Barra.dxf inserida em X:{current_x_pos:.2f}, Y:{offset_y_barra:.2f}. Largura da barra: {barra_width:.2f} mm.")
-                        current_x_pos += barra_width + ESPACAMENTO_SEPARADOR
+                        current_x_pos += barra_width + ESPACAMENTO_SEPARADOR_POST_BARRA + ADJUSTMENT_OFFSET_BARRA_MM
                     else:
                         current_x_pos += ESPACAMENTO_DXF_MESMO_FURO
                     print(f"[DEBUG] current_x_pos após barra (ou fallback) e espaçamento: {current_x_pos:.2f} mm")
@@ -392,7 +399,7 @@ def generate_single_plan_layout_data(
                         # Inserir separador antes de um novo tipo de furo
                         if barra_entities:
                             print(f"DEBUG: Inserindo Barra.dxf antes do novo furo '{hole_type}'. current_x_pos antes: {current_x_pos:.2f} mm")
-                            current_x_pos += ESPACAMENTO_SEPARADOR
+                            current_x_pos += ESPACAMENTO_SEPARADOR_PRE_BARRA
                             offset_x_barra = current_x_pos - barra_original_min_x
                             offset_y_barra = row_base_y - barra_original_min_y
                             for ent in barra_entities:
@@ -400,7 +407,7 @@ def generate_single_plan_layout_data(
                                 new_ent.translate(offset_x_barra, offset_y_barra, 0)
                                 all_relative_entities_with_coords.append((new_ent, new_ent.dxf.insert.x if hasattr(new_ent.dxf, 'insert') else offset_x_barra, new_ent.dxf.insert.y if hasattr(new_ent.dxf, 'insert') else offset_y_barra))
                             print(f"[DEBUG] Barra.dxf inserida em X:{current_x_pos:.2f}, Y:{offset_y_barra:.2f}. Largura da barra: {barra_width:.2f} mm.")
-                            current_x_pos += barra_width + ESPACAMENTO_SEPARADOR
+                            current_x_pos += barra_width + ESPACAMENTO_SEPARADOR_POST_BARRA + ADJUSTMENT_OFFSET_BARRA_MM
                         else:
                             current_x_pos += ESPACAMENTO_DXF_MESMO_FURO
                         print(f"[DEBUG] current_x_pos após barra (ou fallback) e espaçamento: {current_x_pos:.2f} mm")
@@ -418,8 +425,9 @@ def generate_single_plan_layout_data(
                         original_min_y = dxf_item['original_min_y']
 
                         if not first_dxf_in_group:
+                            print(f"DEBUG: Adding ESPACAMENTO_DXF_MESMO_FURO ({ESPACAMENTO_DXF_MESMO_FURO:.2f} mm). current_x_pos before: {current_x_pos:.2f} mm")
                             current_x_pos += ESPACAMENTO_DXF_MESMO_FURO # Espaçamento entre DXFs do mesmo furo
-                            print(f"[DEBUG] Avançando X para próximo DXF no grupo: {current_x_pos:.2f} mm")
+                            print(f"DEBUG: current_x_pos after ESPACAMENTO_DXF_MESMO_FURO: {current_x_pos:.2f} mm")
 
                         # Calcular offset para mover o DXF para a posição atual (current_x_pos, row_base_y)
                         offset_x = current_x_pos - original_min_x
@@ -432,6 +440,7 @@ def generate_single_plan_layout_data(
                         
                         print(f"[DEBUG] Item '{sku}' inserido em X:{current_x_pos:.2f}, Y:{row_base_y:.2f} (relativo). Largura do item: {bbox_width:.2f} mm.")
                         current_x_pos += bbox_width # Avança X pela largura do DXF
+                        print(f"DEBUG: current_x_pos after item '{sku}' (width {bbox_width:.2f}): {current_x_pos:.2f} mm")
                         first_dxf_in_group = False
                     
                     first_hole_type_in_size = False
