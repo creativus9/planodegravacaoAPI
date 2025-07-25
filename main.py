@@ -14,9 +14,9 @@ app = FastAPI()
 # --- Configuração CORS ---
 origins = [
     "http://localhost",
-    "http://localhost:5173",
-    "https://web-production-ba02.up.railway.app", # Adicione esta linha
-    "https://script.google.com",
+    "http://localhost:5173", # O endereço padrão do seu frontend React em desenvolvimento
+    "https://web-production-ba02.up.railway.app", # Adicionado a URL do seu Railway
+    "https://script.google.com", # Para permitir requisições do Google Apps Script
 ]
 
 app.add_middleware(
@@ -44,11 +44,13 @@ class EntradaComposicao(BaseModel):
     - nome_plano_corte: O nome do plano de corte (ex: "01", "A").
     - id_pasta_entrada_drive: O ID da pasta do Google Drive de onde os arquivos DXF personalizados são lidos.
     - id_pasta_saida_drive: O ID da pasta do Google Drive onde o DXF gerado será salvo.
+    - output_filename: Opcional. Nome do arquivo DXF de saída. Se não fornecido, será gerado automaticamente.
     """
     itens: List[ItemEntrada] = Field(..., min_items=1, description="Lista de itens DXF a serem compostos.")
     nome_plano_corte: str = Field(..., description="Nome do plano de corte (ex: '01', 'A').")
     id_pasta_entrada_drive: str = Field(..., description="ID da pasta do Google Drive de onde os arquivos DXF personalizados são lidos.")
     id_pasta_saida_drive: str = Field(..., description="ID da pasta do Google Drive onde o DXF gerado será salvo.")
+    output_filename: Optional[str] = Field(None, description="Nome do arquivo DXF de saída. Se não fornecido, será gerado automaticamente.")
 
 
 @app.post("/compor-plano")
@@ -65,6 +67,8 @@ async def compor_plano(entrada: EntradaComposicao):
     print(f"[INFO] ID da pasta de entrada do Drive: {entrada.id_pasta_entrada_drive}")
     print(f"[INFO] ID da pasta de saída do Drive: {entrada.id_pasta_saida_drive}")
     print(f"[INFO] Total de itens a processar: {len(entrada.itens)}")
+    if entrada.output_filename:
+        print(f"[INFO] Nome de arquivo de saída especificado: {entrada.output_filename}")
 
     try:
         # Chama a função principal de composição
@@ -72,14 +76,15 @@ async def compor_plano(entrada: EntradaComposicao):
         caminho_dxf_saida = compor_dxf_personalizado(
             file_ids_and_skus=[item.model_dump() for item in entrada.itens],
             plan_name=entrada.nome_plano_corte,
-            drive_folder_id=entrada.id_pasta_entrada_drive # Usa a pasta de entrada para baixar
+            drive_folder_id=entrada.id_pasta_entrada_drive, # Usa a pasta de entrada para baixar
+            output_filename=entrada.output_filename # Passa o nome de arquivo opcional
         )
 
         # Faz o upload do arquivo DXF gerado para o Google Drive
         # Agora usa id_pasta_saida_drive para o upload
         url_dxf = upload_to_drive(
             caminho_dxf_saida,
-            os.path.basename(caminho_dxf_saida),
+            os.path.basename(caminho_dxf_saida), # Usa o nome base do arquivo salvo localmente
             "application/dxf",
             entrada.id_pasta_saida_drive # Usa a pasta de saída para fazer upload
         )
