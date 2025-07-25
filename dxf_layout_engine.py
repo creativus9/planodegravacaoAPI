@@ -48,8 +48,8 @@ ITEM_DXF_FIXED_HEIGHT_MM = 225.998
 
 # --- Configurações da Barra Separadora ---
 BARRA_DXF_PATH = os.path.join("Plano_Info", "Barra.dxf")
-BARRA_DXF_FIXED_WIDTH_MM = 10.0
-BARRA_DXF_FIXED_HEIGHT_MM = 250.0
+BARRA_DXF_FIXED_WIDTH_MM = 10.0  # Alterado para 10.0 (largura)
+BARRA_DXF_FIXED_HEIGHT_MM = 250.0 # Alterado para 250.0 (altura)
 ESPACAMENTO_SEPARADOR = 100 # Espaçamento de 100mm antes e depois da barra
 
 # Variável global para armazenar as entidades da barra
