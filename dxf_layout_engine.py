@@ -57,7 +57,7 @@ ESPACAMENTO_SEPARADOR_POST_BARRA = 100.0 # Espaçamento depois da barra
 
 # Variável de ajuste manual para a distância da barra (pode ser positiva ou negativa)
 # Use esta variável para corrigir pequenas variações na distância percebida da barra.
-ADJUSTMENT_OFFSET_BARRA_MM = 0.0
+ADJUSTMENT_OFFSET_BARRA_MM = -112.0
 
 # Variável global para armazenar as entidades da barra
 barra_entities = []
