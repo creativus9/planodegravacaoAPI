@@ -20,28 +20,36 @@ def calcular_bbox_dxf(msp):
     """
     Calcula o bounding box (caixa delimitadora) de todas as entidades no modelspace de um DXF.
     Retorna (min_x, min_y, max_x, max_y).
-    Usa msp.get_extents() para uma abordagem mais robusta.
+    Esta versão itera sobre as entidades para maior compatibilidade.
     """
-    try:
-        # get_extents() retorna (extmin, extmax) onde extmin e extmax são Vec3 objects
-        extmin, extmax = msp.get_extents()
+    min_x, min_y = float('inf'), float('inf')
+    max_x, max_y = float('-inf'), float('-inf')
 
-        # Verifica se os extents são válidos (não infinitos ou NaN)
-        # Vec3 objects têm atributos x, y, z
-        if not all(map(lambda c: c is not None and not float('inf') in c and not float('-inf') in c and not float('nan') in c, [extmin, extmax])):
-            print(f"[WARN] get_extents() retornou valores inválidos: extmin={extmin}, extmax={extmax}")
-            return 0, 0, 0, 0
+    found_valid_bbox = False
 
-        min_x, min_y = extmin.x, extmin.y
-        max_x, max_y = extmax.x, extmax.y
+    for e in msp:
+        try:
+            bb = e.bbox()
+            if bb.extmin and bb.extmax:
+                exmin, exmax = bb.extmin, bb.extmax
+                min_x = min(min_x, exmin.x)
+                min_y = min(min_y, exmin.y)
+                max_x = max(max_x, exmax.x)
+                max_y = max(max_y, exmax.y)
+                found_valid_bbox = True
+        except Exception as err:
+            # Algumas entidades podem não ter bbox ou causar erro ao calcular
+            # print(f"[WARN] Erro ao calcular bbox para entidade {e.dxf.handle}: {err}")
+            pass # Ignora entidades que não podem ter bbox
 
-        # Basic validation: if min_x/y is greater than max_x/y, it means no valid geometry
-        if min_x >= max_x or min_y >= max_y:
-            print(f"[WARN] Bounding box inválido (min >= max): min_x={min_x}, max_x={max_x}, min_y={min_y}, max_y={max_y}")
-            return 0, 0, 0, 0
+    if not found_valid_bbox: # Nenhum bbox válido encontrado
+        print(f"[WARN] Nenhuma entidade com bbox válido encontrada no modelspace. Retornando 0,0,0,0.")
+        return 0, 0, 0, 0 # Retorna um bbox vazio
 
-        return min_x, min_y, max_x, max_y
-    except Exception as e:
-        print(f"[ERROR] Erro ao calcular bbox com get_extents(): {e}")
-        return 0, 0, 0, 0 # Retorna 0 se houver qualquer erro
+    # Adicionando uma validação básica para garantir que min < max
+    if min_x >= max_x or min_y >= max_y:
+        print(f"[WARN] Bounding box calculado é inválido (min >= max). Retornando 0,0,0,0. (min_x={min_x}, max_x={max_x}, min_y={min_y}, max_y={max_y})")
+        return 0, 0, 0, 0
+
+    return min_x, min_y, max_x, max_y
 
