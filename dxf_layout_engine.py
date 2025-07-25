@@ -24,6 +24,12 @@ except ImportError as e:
     print(f"ERROR: dxf_layout_engine.py - Falha ao importar google_drive_utils: {e}")
     raise # Re-levanta o erro para que o traceback seja claro
 
+# --- Exceção Customizada ---
+class NoEntitiesFoundError(Exception):
+    """Exceção levantada quando nenhum DXF válido é encontrado para gerar o layout."""
+    pass
+# --- Fim da Exceção Customizada ---
+
 # --- Configurações de Layout (em mm) ---
 # Tamanho da folha de corte (exemplo: A0 ou um tamanho personalizado)
 FOLHA_LARGURA_MM, FOLHA_ALTURA_MM = 1200, 900 # Exemplo: 1.2m x 0.9m
@@ -57,7 +63,7 @@ ESPACAMENTO_SEPARADOR_POST_BARRA = 100.0 # Espaçamento depois da barra
 
 # Variável de ajuste manual para a distância da barra (pode ser positiva ou negativa)
 # Use esta variável para corrigir pequenas variações na distância percebida da barra.
-ADJUSTMENT_OFFSET_BARRA_MM = 250.0
+ADJUSTMENT_OFFSET_BARRA_MM = 0.0
 
 # Variável global para armazenar as entidades da barra
 barra_entities = []
@@ -466,14 +472,14 @@ def generate_single_plan_layout_data(
 
         if min_x_layout == max_x_layout and min_y_layout == max_y_layout and len(all_relative_entities_with_coords) > 0:
             print("[WARN] Bounding box final do layout do plano ainda é 0x0. Pode haver entidades sem geometria.")
-            layout_width = MARGEM_ESQUERDA * 2 + 100 # Exemplo de largura mínima
-            layout_height = estimated_layout_height # Usa a altura estimada
-            
-            return [(ent, x, y) for ent, x, y in all_relative_entities_with_coords], layout_width, layout_height
+            # Se o bbox ainda for 0x0, mas há entidades, é um problema de detecção de geometria.
+            # Neste caso, levantamos a exceção para sinalizar que o layout não é válido.
+            raise NoEntitiesFoundError(f"Nenhuma geometria válida encontrada para o plano '{plan_name}'.")
             
     else:
         print("[INFO] Nenhum item ou plano para o layout. Retornando layout vazio.")
-        return [], 0.0, 0.0
+        # Se não há entidades, o layout é considerado vazio, o que é um cenário de falha para a geração do DXF.
+        raise NoEntitiesFoundError(f"Nenhum item ou plano válido para o layout do plano '{plan_name}'.")
 
     # Ajustar todas as entidades para que o canto inferior esquerdo do layout seja (0,0)
     offset_x_final = -min_x_layout
