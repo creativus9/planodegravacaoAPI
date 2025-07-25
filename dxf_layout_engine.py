@@ -3,11 +3,11 @@ import ezdxf
 import re
 import datetime
 from collections import defaultdict
-from typing import Optional, List, Tuple, Any # Adiciona List, Tuple, Any
+from typing import Optional, List, Dict # Adiciona List e Dict para tipagem
 
 # Importa as funções utilitárias e de Google Drive
 from dxf_utils import parse_sku, calcular_bbox_dxf
-from google_drive_utils import baixar_arquivo_drive, upload_to_drive, buscar_arquivo_personalizado_por_id_e_sku # Importa buscar_arquivo_personalizado_por_id_e_sku
+from google_drive_utils import baixar_arquivo_drive, upload_to_drive, buscar_arquivo_personalizado_por_id_e_sku
 
 # --- Configurações de Layout (em mm) ---
 # Tamanho da folha de corte (exemplo: A0 ou um tamanho personalizado)
@@ -18,13 +18,15 @@ ESPACAMENTO_DXF_MESMO_FURO = 100  # Espaçamento horizontal entre DXFs do mesmo 
 ESPACAMENTO_DXF_FURO_DIFERENTE = 200 # Espaçamento horizontal entre grupos de furos diferentes
 ESPACAMENTO_LINHA_COR = 200       # Espaçamento vertical entre linhas de cores diferentes
 ESPACAMENTO_PLANO_COR = 100       # Espaçamento vertical entre o DXF do plano e a primeira linha de cor
+ESPACAMENTO_ENTRE_PLANOS = 300    # Espaçamento vertical entre diferentes blocos de planos (plano + seus itens)
+ESPACAMENTO_BARRA_SEPARADORA = 100 # Espaçamento antes e depois da Barra.dxf
 
 # Margens da folha
 MARGEM_ESQUERDA = 50
 MARGEM_SUPERIOR = 50
 MARGEM_INFERIOR = 50
 
-# --- Dimensões Fixas para Fallback (Adicionado) ---
+# --- Dimensões Fixas para Fallback ---
 # Usadas se calcular_bbox_dxf retornar 0x0
 PLANO_DXF_FIXED_WIDTH_MM = 236.0
 PLANO_DXF_FIXED_HEIGHT_MM = 21.5
@@ -32,349 +34,312 @@ PLANO_DXF_FIXED_HEIGHT_MM = 21.5
 ITEM_DXF_FIXED_WIDTH_MM = 129.0
 ITEM_DXF_FIXED_HEIGHT_MM = 225.998
 
+# --- Informações da Barra Separadora (Adicionado) ---
+BARRA_DXF_FILENAME = "Barra.dxf"
+BARRA_DXF_WIDTH_MM = 10.0
+BARRA_DXF_HEIGHT_MM = 250.0 # Altura da barra, para que ela se estenda verticalmente
 
-def generate_single_plan_layout_data(
-    file_ids_and_skus: list[dict],
-    plan_name: str,
+def compor_dxf_personalizado(
+    plans: List[Dict], # Agora recebe uma lista de dicionários de planos
     drive_folder_id: str,
-) -> Tuple[List[Tuple[Any, float, float]], float, float]:
+    output_filename: Optional[str] = None # Nome de arquivo de saída opcional
+):
     """
-    Gera as entidades DXF e suas posições relativas para o layout de um único plano de corte,
-    assumindo que o canto inferior esquerdo do layout final será (0,0).
+    Componha um novo arquivo DXF organizando múltiplos planos de corte
+    e seus respectivos itens.
 
     Args:
-        file_ids_and_skus: Lista de dicionários, cada um com 'id_arquivo_drive' (ID lógico do nome) do Drive
-                           e 'sku' correspondente.
-        plan_name: Nome do plano de corte (ex: "01", "A").
+        plans: Lista de dicionários, cada um representando um plano de corte.
+               Ex: [{'plan_name': '01', 'items': [{'id_arquivo_drive': 'abc', 'sku': '...'}]]
         drive_folder_id: ID da pasta principal do Google Drive.
+        output_filename: Opcional. Nome do arquivo DXF de saída. Se não fornecido, será gerado automaticamente.
 
     Returns:
-        Uma tupla contendo:
-        - Uma lista de tuplas: (entidade ezdxf copiada, x_pos_relativa, y_pos_relativa)
-        - A largura total do layout do plano.
-        - A altura total do layout do plano.
+        O caminho local para o arquivo DXF de saída.
     """
-    
-    # Usaremos um documento temporário para calcular as posições relativas
-    # e depois copiaremos as entidades para o documento principal no main.py
-    temp_doc = ezdxf.new('R2010') 
-    temp_msp = temp_doc.modelspace()
+    doc = ezdxf.new('R2010') # Use uma versão do DXF compatível
+    msp = doc.modelspace()
 
-    # Estrutura para organizar os DXFs por cor e furo
-    # { 'DOU': { '2FH': [ {dxf_entity, original_sku, bbox_width, bbox_height, original_min_x, original_min_y}, ... ] } }
-    organized_dxfs = defaultdict(lambda: defaultdict(list))
-    
-    # --- 1. Baixar e Organizar DXFs de Itens ---
-    print(f"[INFO] Baixando e organizando DXFs de itens para o plano '{plan_name}'...")
-    for item_data in file_ids_and_skus:
-        target_id_from_sheet = item_data['id_arquivo_drive'] 
-        sku = item_data['sku']
-        
-        hole_type, color_code = parse_sku(sku)
-        if not hole_type or not color_code:
-            print(f"[WARN] SKU '{sku}' inválido, ignorando item.")
-            continue
+    # current_y_cursor: Representa a coordenada Y do TOPO do próximo bloco de plano/itens a ser posicionado
+    # Começa do topo da folha, abaixo da margem superior
+    current_y_cursor = FOLHA_ALTURA_MM - MARGEM_SUPERIOR
+    print(f"[DEBUG] Posição inicial do cursor Y (topo da folha - margem): {current_y_cursor:.2f} mm")
 
+    # Ordena os planos pelo nome para garantir uma ordem consistente no layout
+    sorted_plans = sorted(plans, key=lambda p: p['plan_name'])
+
+    # Carregar o DXF da Barra Separadora uma única vez e criar um bloco
+    barra_block_name = "BARRA_SEPARADORA"
+    barra_dxf_path = os.path.join("Plano_Info", BARRA_DXF_FILENAME)
+    if os.path.exists(barra_dxf_path):
         try:
-            real_file_id, nome_arquivo_drive = buscar_arquivo_personalizado_por_id_e_sku(
-                target_id=target_id_from_sheet,
-                sku=sku,
-                drive_folder_id=drive_folder_id
-            )
-            print(f"[INFO] Arquivo encontrado no Drive: ID real='{real_file_id}', Nome='{nome_arquivo_drive}'")
-        except FileNotFoundError as e:
-            print(f"[ERROR] Falha ao encontrar arquivo no Drive para ID lógico '{target_id_from_sheet}' e SKU '{sku}': {e}")
-            continue
-        except Exception as e:
-            print(f"[ERROR] Erro inesperado ao buscar arquivo no Drive para ID lógico '{target_id_from_sheet}' e SKU '{sku}': {e}")
-            continue
-
-        local_dxf_name = f"{sku}.dxf"
-        try:
-            dxf_path_local = baixar_arquivo_drive(real_file_id, local_dxf_name, drive_folder_id)
-        except Exception as e:
-            print(f"[ERROR] Falha ao baixar DXF para SKU '{sku}' (ID real: {real_file_id}): {e}")
-            continue
-
-        try:
-            item_doc = ezdxf.readfile(dxf_path_local)
-            item_msp = item_doc.modelspace()
-            min_x, min_y, max_x, max_y = calcular_bbox_dxf(item_msp)
+            barra_doc = ezdxf.readfile(barra_dxf_path)
+            barra_msp = barra_doc.modelspace()
+            min_x_barra, min_y_barra, max_x_barra, max_y_barra = calcular_bbox_dxf(barra_msp)
             
-            dxf_width = max_x - min_x
-            dxf_height = max_y - min_y
+            # Usar dimensões fixas se o bbox for 0x0 para a barra também
+            if (max_x_barra - min_x_barra) == 0.0 and (max_y_barra - min_y_barra) == 0.0:
+                print(f"[WARN] Dimensões de '{BARRA_DXF_FILENAME}' calculadas como 0x0. Usando dimensões fixas: {BARRA_DXF_WIDTH_MM}x{BARRA_DXF_HEIGHT_MM} mm.")
+                min_x_barra, min_y_barra = 0.0, 0.0
+                barra_width = BARRA_DXF_WIDTH_MM
+                barra_height = BARRA_DXF_HEIGHT_MM
+            else:
+                barra_width = max_x_barra - min_x_barra
+                barra_height = max_y_barra - min_y_barra
 
-            # --- Fallback para dimensões fixas se bbox for 0x0 (Adicionado) ---
-            if dxf_width == 0.0 and dxf_height == 0.0:
-                print(f"[WARN] Dimensões de SKU '{sku}' calculadas como 0x0. Usando dimensões fixas: {ITEM_DXF_FIXED_WIDTH_MM}x{ITEM_DXF_FIXED_HEIGHT_MM} mm.")
-                dxf_width = ITEM_DXF_FIXED_WIDTH_MM
-                dxf_height = ITEM_DXF_FIXED_HEIGHT_MM
-                # Para o offset, assumimos que o ponto de origem do desenho é (0,0) se não houver bbox válido
-                min_x, min_y = 0.0, 0.0 
-            # --- Fim do Fallback ---
-
-            entities_to_add = []
-            for entity in item_msp:
-                entities_to_add.append(entity.copy()) # Copia para evitar referências ao doc original
-
-            organized_dxfs[color_code][hole_type].append({
-                'entities': entities_to_add,
-                'sku': sku,
-                'bbox_width': dxf_width,
-                'bbox_height': dxf_height,
-                'original_min_x': min_x,
-                'original_min_y': min_y
-            })
-            print(f"[INFO] DXF para SKU '{sku}' (cor: {color_code}, furo: {hole_type}) processado. Dimensões: {dxf_width:.2f}x{dxf_height:.2f} mm")
-
-        except ezdxf.DXFStructureError as e:
-            print(f"[ERROR] Arquivo DXF '{dxf_path_local}' corrompido ou inválido: {e}")
-        except Exception as e:
-            print(f"[ERROR] Erro ao processar DXF '{dxf_path_local}': {e}")
-        finally:
-            if os.path.exists(dxf_path_local):
-                os.remove(dxf_path_local)
-
-    # --- 2. Preparar DXF do Plano de Corte ---
-    plano_info_dxf_path = os.path.join("Plano_Info", f"{plan_name}.dxf")
-    
-    plano_width = 0
-    plano_height = 0
-    plano_entities = [] # Lista para armazenar as entidades do plano
-    plano_original_min_x, plano_original_min_y = 0.0, 0.0
-
-    if os.path.exists(plano_info_dxf_path):
-        try:
-            plano_doc = ezdxf.readfile(plano_info_dxf_path)
-            plano_msp = plano_doc.modelspace()
-            
-            min_x_plano, min_y_plano, max_x_plano, max_y_plano = calcular_bbox_dxf(plano_msp)
-            plano_width = max_x_plano - min_x_plano
-            plano_height = max_y_plano - min_y_plano
-            plano_original_min_x, plano_original_min_y = min_x_plano, min_y_plano
-
-            # --- Fallback para dimensões fixas se bbox for 0x0 (Adicionado) ---
-            if plano_width == 0.0 and plano_height == 0.0:
-                print(f"[WARN] Dimensões do plano '{plan_name}.dxf' calculadas como 0x0. Usando dimensões fixas: {PLANO_DXF_FIXED_WIDTH_MM}x{PLANO_DXF_FIXED_HEIGHT_MM} mm.")
-                plano_width = PLANO_DXF_FIXED_WIDTH_MM
-                plano_height = PLANO_DXF_FIXED_HEIGHT_MM
-                plano_original_min_x, plano_original_min_y = 0.0, 0.0 # Reinicia offset se usar fixo
-            # --- Fim do Fallback ---
-
-            for ent in plano_msp:
-                plano_entities.append(ent.copy()) # Copia para evitar referências ao doc original
-            
-            print(f"[INFO] DXF do plano de corte '{plano_info_dxf_path}' carregado. Dimensões: {plano_width:.2f}x{plano_height:.2f} mm")
-
-        except ezdxf.DXFStructureError as e:
-            print(f"[ERROR] Arquivo DXF do plano de corte '{plano_info_dxf_path}' corrompido ou inválido: {e}")
-            plano_entities = [] # Limpa as entidades se houver erro
-        except Exception as e:
-            print(f"[ERROR] Erro ao carregar DXF do plano de corte '{plano_info_dxf_path}': {e}")
-            plano_entities = [] # Limpa as entidades se houver erro
-    else:
-        print(f"[WARN] DXF do plano de corte '{plano_info_dxf_path}' não encontrado localmente. Não será inserido.")
-
-    # --- 3. Posicionar e Coletar Entidades no Modelspace Relativo ---
-    
-    # Esta lista armazenará todas as entidades com suas posições finais RELATIVAS
-    # ao canto inferior esquerdo do layout deste plano (que será (0,0) após o ajuste final)
-    all_relative_entities_with_coords = []
-
-    # current_y_cursor: Representa a coordenada Y do TOPO do próximo elemento a ser posicionado
-    # Começamos do topo do layout relativo, que será ajustado para (0,0) no final.
-    # Por enquanto, assumimos que o layout pode crescer para cima a partir de um "piso" 0.
-    # A altura total será calculada no final.
-    
-    # A lógica de posicionamento será de cima para baixo, então o "topo" inicial é a altura máxima esperada
-    # para este plano, que será ajustada.
-    
-    # Para simplificar o cálculo do bbox final, vamos posicionar tudo como se o canto inferior esquerdo
-    # do layout final fosse (0,0). Isso significa que as coordenadas Y serão positivas.
-    # current_y_cursor será a coordenada Y do canto inferior esquerdo da PRÓXIMA linha a ser inserida.
-    
-    # Primeiro, determinamos a altura total necessária para este plano.
-    # Isso é um pouco complexo porque a altura depende do conteúdo.
-    # Vamos fazer uma primeira passagem "virtual" para calcular a altura.
-
-    # Altura total estimada para o layout deste plano
-    estimated_layout_height = 0
-    if plano_entities:
-        estimated_layout_height += plano_height + ESPACAMENTO_PLANO_COR
-    
-    # Adiciona a altura de cada linha de cor + espaçamento
-    for color_code in sorted(organized_dxfs.keys()):
-        color_group = organized_dxfs[color_code]
-        max_height_in_color_line = 0
-        for hole_type in color_group:
-            for dxf_item in color_group[hole_type]:
-                max_height_in_color_line = max(max_height_in_color_line, dxf_item['bbox_height'])
-        estimated_layout_height += max_height_in_color_line + ESPACAMENTO_LINHA_COR
-    
-    # Remove o último espaçamento de linha de cor, pois não há próxima linha
-    if organized_dxfs:
-        estimated_layout_height -= ESPACAMENTO_LINHA_COR
-    
-    # Se não houver itens nem plano, definimos uma altura mínima para evitar 0
-    if estimated_layout_height == 0:
-        estimated_layout_height = 1 # Altura mínima para um layout vazio
-
-    # Agora, posicionamos os elementos de cima para baixo.
-    # current_y_pos_for_new_row: A coordenada Y do canto inferior esquerdo da próxima "linha" de elementos.
-    # Começa na altura total estimada menos a margem inferior (se houver, mas aqui é relativo a 0,0)
-    current_y_pos_for_new_row = estimated_layout_height - MARGEM_INFERIOR # Começa do topo do espaço disponível
-
-    # Inserir o DXF do plano de corte no topo, se houver
-    if plano_entities:
-        # A posição Y para o canto inferior esquerdo do bloco do plano
-        # é o cursor atual menos a altura do plano
-        plano_insert_y = current_y_pos_for_new_row - plano_height
-        
-        offset_x_plano = MARGEM_ESQUERDA - plano_original_min_x
-        offset_y_plano = plano_insert_y - plano_original_min_y
-
-        for ent in plano_entities:
-            new_ent = ent.copy()
-            new_ent.translate(offset_x_plano, offset_y_plano, 0)
-            all_relative_entities_with_coords.append((new_ent, new_ent.dxf.insert.x if hasattr(new_ent.dxf, 'insert') else offset_x_plano, new_ent.dxf.insert.y if hasattr(new_ent.dxf, 'insert') else offset_y_plano))
-        
-        print(f"[DEBUG] Plano de corte '{plan_name}.dxf' inserido em X:{MARGEM_ESQUERDA:.2f}, Y:{plano_insert_y:.2f} (relativo).")
-        
-        # Atualiza o cursor Y para o próximo elemento (abaixo do plano + espaçamento)
-        current_y_pos_for_new_row = plano_insert_y - ESPACAMENTO_PLANO_COR
-        print(f"[DEBUG] Cursor Y após plano de corte: {current_y_pos_for_new_row:.2f} mm (abaixo do plano + espaçamento)")
-    else:
-        print("[DEBUG] Nenhum DXF de plano de corte para inserir.")
-
-
-    # Ordenar cores para um layout consistente (ex: alfabético)
-    sorted_colors = sorted(organized_dxfs.keys())
-
-    for color_code in sorted_colors:
-        color_group = organized_dxfs[color_code]
-        current_x_pos = MARGEM_ESQUERDA # Reseta X para cada nova linha de cor
-        
-        # Encontra a altura máxima dos DXFs nesta linha de cor para determinar o avanço vertical
-        max_height_in_color_line = 0
-        for hole_type in color_group:
-            for dxf_item in color_group[hole_type]:
-                max_height_in_color_line = max(max_height_in_color_line, dxf_item['bbox_height'])
-
-        # A posição Y para esta linha de cor (canto inferior esquerdo dos itens)
-        # current_y_pos_for_new_row já está no topo da linha atual, então subtraímos a altura máxima da linha
-        row_base_y = current_y_pos_for_new_row - max_height_in_color_line
-        print(f"[DEBUG] Iniciando linha de cor '{color_code}'. Altura máx na linha: {max_height_in_color_line:.2f} mm. Base Y da linha: {row_base_y:.2f} mm")
-        
-        # Ordenar tipos de furo para um layout consistente
-        sorted_hole_types = sorted(color_group.keys())
-
-        first_hole_type_in_line = True
-        for hole_type in sorted_hole_types:
-            hole_type_group = color_group[hole_type]
-            
-            if not first_hole_type_in_line:
-                current_x_pos += ESPACAMENTO_DXF_FURO_DIFERENTE # Espaçamento entre grupos de furos
-                print(f"[DEBUG] Avançando X para novo grupo de furo '{hole_type}': {current_x_pos:.2f} mm")
-            
-            # Ordenar DXFs dentro do grupo de furo (opcional, mas bom para consistência)
-            sorted_hole_type_dxfs = sorted(hole_type_group, key=lambda x: x['sku'])
-
-            first_dxf_in_group = True
-            for dxf_item in sorted_hole_type_dxfs:
-                entities = dxf_item['entities']
-                sku = dxf_item['sku']
-                bbox_width = dxf_item['bbox_width']
-                bbox_height = dxf_item['bbox_height']
-                original_min_x = dxf_item['original_min_x']
-                original_min_y = dxf_item['original_min_y']
-
-                if not first_dxf_in_group:
-                    current_x_pos += ESPACAMENTO_DXF_MESMO_FURO # Espaçamento entre DXFs do mesmo furo
-                    print(f"[DEBUG] Avançando X para próximo DXF no grupo: {current_x_pos:.2f} mm")
-
-                # Calcular offset para mover o DXF para a posição atual (current_x_pos, row_base_y)
-                # O ponto de referência para a inserção é o canto inferior esquerdo do bbox do DXF
-                offset_x = current_x_pos - original_min_x
-                offset_y = row_base_y - original_min_y # Usar row_base_y para alinhar a base da linha
-
-                for ent in entities:
+            if barra_block_name not in doc.blocks:
+                blk_barra = doc.blocks.new(name=barra_block_name)
+                offset_x_barra_block = -min_x_barra
+                offset_y_barra_block = -min_y_barra
+                for ent in barra_msp:
                     new_ent = ent.copy()
-                    new_ent.translate(offset_x, offset_y, 0)
-                    all_relative_entities_with_coords.append((new_ent, new_ent.dxf.insert.x if hasattr(new_ent.dxf, 'insert') else offset_x, new_ent.dxf.insert.y if hasattr(new_ent.dxf, 'insert') else offset_y))
-                
-                print(f"[DEBUG] Item '{sku}' inserido em X:{current_x_pos:.2f}, Y:{row_base_y:.2f} (relativo).")
-                current_x_pos += bbox_width # Avança X pela largura do DXF
-                first_dxf_in_group = False
-            
-            first_hole_type_in_line = False
-        
-        # Após processar todos os furos para uma cor, avança Y para a próxima linha de cor
-        current_y_pos_for_new_row = row_base_y - ESPACAMENTO_LINHA_COR
-        print(f"[DEBUG] Cursor Y após linha de cor '{color_code}': {current_y_pos_for_new_row:.2f} mm (abaixo da linha + espaçamento)")
-
-    # --- 4. Calcular Bounding Box Final do Layout do Plano e Ajustar para (0,0) ---
-    min_x_layout, min_y_layout, max_x_layout, max_y_layout = 0, 0, 0, 0
-    
-    if all_relative_entities_with_coords:
-        # Para calcular o bbox real, precisamos adicionar as entidades a um temp_msp
-        # e depois calcular o bbox desse modelspace.
-        # Ou, podemos iterar sobre as entidades e seus pontos de inserção já calculados.
-        
-        # Vamos criar um bbox de união para todas as entidades já com suas posições relativas
-        from ezdxf.math import BoundingBox, Vec3
-        layout_bbox = BoundingBox()
-
-        for ent, x_pos, y_pos in all_relative_entities_with_coords:
-            # Para entidades complexas como INSERTs, o bbox() já considera a transformação.
-            # Para outras, como LINE, CIRCLE, etc., o bbox() retorna o bbox do objeto em suas próprias coordenadas.
-            # Precisamos transladar esses bboxes para a posição final.
-            try:
-                entity_bbox = ent.bbox()
-                if not entity_bbox.is_empty:
-                    # Translada os pontos do bbox da entidade para sua posição final no layout
-                    # Isso é um pouco mais complexo, pois ent.bbox() retorna o bbox em coordenadas locais.
-                    # Se 'ent' já foi transladado, seus pontos já estão nas coordenadas relativas.
-                    # A forma mais segura é recalcular o bbox do modelspace temporário
-                    # após adicionar todas as entidades a ele.
-                    pass # Faremos isso abaixo
-            except Exception:
-                pass # Ignora entidades que não têm um bbox válido
-
-        # Adiciona todas as entidades ao temp_msp para calcular o bbox
-        for ent, _, _ in all_relative_entities_with_coords:
-            temp_msp.add_entity(ent) # Adiciona a entidade já com a posição relativa calculada
-
-        min_x_layout, min_y_layout, max_x_layout, max_y_layout = calcular_bbox_dxf(temp_msp)
-
-        # Se o bbox ainda for 0,0,0,0, e houver entidades, significa um problema no cálculo do bbox
-        if min_x_layout == max_x_layout and min_y_layout == max_y_layout and len(all_relative_entities_with_coords) > 0:
-            print("[WARN] Bounding box final do layout do plano ainda é 0x0. Pode haver entidades sem geometria.")
-            # Fallback para uma dimensão mínima se o bbox for degenerado
-            layout_width = MARGEM_ESQUERDA * 2 + 100 # Exemplo de largura mínima
-            layout_height = estimated_layout_height # Usa a altura estimada
-            # Não há ajuste para (0,0) se não houver bbox real
-            
-            # Retorna as entidades como estão, sem ajuste de offset, e as dimensões estimadas
-            return [(ent, x, y) for ent, x, y in all_relative_entities_with_coords], layout_width, layout_height
-            
+                    new_ent.translate(offset_x_barra_block, offset_y_barra_block, 0)
+                    blk_barra.add_entity(new_ent)
+            print(f"[INFO] DXF da barra separadora '{BARRA_DXF_FILENAME}' carregado e preparado como bloco. Dimensões: {barra_width:.2f}x{barra_height:.2f} mm")
+        except Exception as e:
+            print(f"[ERROR] Erro ao carregar DXF da barra separadora '{BARRA_DXF_FILENAME}': {e}")
+            barra_block_name = None # Impede o uso se houver erro
     else:
-        # Se não houver entidades, o layout tem 0 de largura e altura
-        print("[INFO] Nenhum item ou plano para o layout. Retornando layout vazio.")
-        return [], 0.0, 0.0
+        print(f"[WARN] DXF da barra separadora '{BARRA_DXF_FILENAME}' não encontrado em 'Plano_Info'. Barras não serão inseridas.")
+        barra_block_name = None
 
-    # Ajustar todas as entidades para que o canto inferior esquerdo do layout seja (0,0)
-    offset_x_final = -min_x_layout
-    offset_y_final = -min_y_layout
+    for plan_data in sorted_plans:
+        plan_name = plan_data['plan_name']
+        file_ids_and_skus = plan_data['items']
 
-    final_entities_with_coords = []
-    for ent, current_x, current_y in all_relative_entities_with_coords:
-        new_ent = ent.copy() # Copia novamente para não modificar a referência original
-        new_ent.translate(offset_x_final, offset_y_final, 0)
-        final_entities_with_coords.append((new_ent, current_x + offset_x_final, current_y + offset_y_final))
+        print(f"\n[INFO] --- Processando Plano de Corte: {plan_name} ---")
 
-    layout_width = max_x_layout - min_x_layout
-    layout_height = max_y_layout - min_y_layout
+        # --- Processar DXF do Plano de Corte (ex: 01.dxf, A.dxf) ---
+        plano_info_dxf_path = os.path.join("Plano_Info", f"{plan_name}.dxf")
+        
+        plano_width = 0
+        plano_height = 0
+        plano_block_name = None
 
-    print(f"[INFO] Layout do plano '{plan_name}' gerado. Dimensões: {layout_width:.2f}x{layout_height:.2f} mm")
-    return final_entities_with_coords, layout_width, layout_height
+        if os.path.exists(plano_info_dxf_path):
+            try:
+                plano_doc = ezdxf.readfile(plano_info_dxf_path)
+                plano_msp = plano_doc.modelspace()
+                
+                min_x_plano, min_y_plano, max_x_plano, max_y_plano = calcular_bbox_dxf(plano_msp)
+                plano_width = max_x_plano - min_x_plano
+                plano_height = max_y_plano - min_y_plano
+
+                # --- Fallback para dimensões fixas se bbox for 0x0 ---
+                if plano_width == 0.0 and plano_height == 0.0:
+                    print(f"[WARN] Dimensões do plano '{plan_name}.dxf' calculadas como 0x0. Usando dimensões fixas: {PLANO_DXF_FIXED_WIDTH_MM}x{PLANO_DXF_FIXED_HEIGHT_MM} mm.")
+                    plano_width = PLANO_DXF_FIXED_WIDTH_MM
+                    plano_height = PLANO_DXF_FIXED_HEIGHT_MM
+                    min_x_plano, min_y_plano = 0.0, 0.0 # Assumimos origem (0,0) para fallback
+                # --- Fim do Fallback ---
+
+                plano_block_name = f"PLANO_INFO_{plan_name.replace('.','_')}"
+                if plano_block_name not in doc.blocks:
+                    blk = doc.blocks.new(name=plano_block_name)
+                    offset_x_plano_block = -min_x_plano
+                    offset_y_plano_block = -min_y_plano
+                    for ent in plano_msp:
+                        new_ent = ent.copy()
+                        new_ent.translate(offset_x_plano_block, offset_y_plano_block, 0)
+                        blk.add_entity(new_ent)
+                
+                print(f"[INFO] DXF do plano de corte '{plano_info_dxf_path}' carregado e preparado como bloco. Dimensões: {plano_width:.2f}x{plano_height:.2f} mm")
+
+            except ezdxf.DXFStructureError as e:
+                print(f"[ERROR] Arquivo DXF do plano de corte '{plano_info_dxf_path}' corrompido ou inválido: {e}")
+                plano_info_dxf_path = None
+            except Exception as e:
+                print(f"[ERROR] Erro ao carregar ou inserir DXF do plano de corte '{plano_info_dxf_path}': {e}")
+                plano_info_dxf_path = None
+        else:
+            print(f"[WARN] DXF do plano de corte '{plano_info_dxf_path}' não encontrado localmente. Não será inserido.")
+            plano_info_dxf_path = None
+
+        # --- Inserir o DXF do Plano de Corte no Modelspace ---
+        plano_insert_y = current_y_cursor - plano_height
+        
+        if plano_info_dxf_path and plano_block_name:
+            msp.add_blockref(plano_block_name, insert=(MARGEM_ESQUERDA, plano_insert_y))
+            print(f"[DEBUG] Plano de corte '{plan_name}.dxf' inserido em X:{MARGEM_ESQUERDA:.2f}, Y:{plano_insert_y:.2f}. Topo em Y:{current_y_cursor:.2f}")
+            
+            current_y_cursor = plano_insert_y - ESPACAMENTO_PLANO_COR
+            print(f"[DEBUG] Cursor Y após plano de corte: {current_y_cursor:.2f} mm (abaixo do plano + espaçamento)")
+        else:
+            print(f"[DEBUG] Nenhum DXF de plano de corte '{plan_name}' para inserir.")
+
+        # --- Baixar e Organizar DXFs de Itens para o Plano Atual ---
+        # organized_dxfs_for_current_plan: { 'cor': { 'formato': { 'furo': [ {item_data}, ... ] } } }
+        organized_dxfs_for_current_plan = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+        print(f"[INFO] Baixando e organizando DXFs de itens para o plano {plan_name}...")
+        for item_data in file_ids_and_skus:
+            target_id_from_sheet = item_data['id_arquivo_drive'] 
+            sku = item_data['sku']
+            
+            # Agora parse_sku retorna formato, furo, cor
+            format_code, hole_type, color_code = parse_sku(sku)
+            if not format_code or not hole_type or not color_code:
+                print(f"[WARN] SKU '{sku}' inválido ou incompleto, ignorando item.")
+                continue
+
+            try:
+                real_file_id, nome_arquivo_drive = buscar_arquivo_personalizado_por_id_e_sku(
+                    target_id=target_id_from_sheet,
+                    sku=sku,
+                    drive_folder_id=drive_folder_id
+                )
+                print(f"[INFO] Arquivo encontrado no Drive: ID real='{real_file_id}', Nome='{nome_arquivo_drive}'")
+            except FileNotFoundError as e:
+                print(f"[ERROR] Falha ao encontrar arquivo no Drive para ID lógico '{target_id_from_sheet}' e SKU '{sku}': {e}")
+                continue
+            except Exception as e:
+                print(f"[ERROR] Erro inesperado ao buscar arquivo no Drive para ID lógico '{target_id_from_sheet}' e SKU '{sku}': {e}")
+                continue
+
+            local_dxf_name = f"{sku}.dxf"
+            try:
+                dxf_path_local = baixar_arquivo_drive(real_file_id, local_dxf_name, drive_folder_id)
+            except Exception as e:
+                print(f"[ERROR] Falha ao baixar DXF para SKU '{sku}' (ID real: {real_file_id}): {e}")
+                continue
+
+            try:
+                item_doc = ezdxf.readfile(dxf_path_local)
+                item_msp = item_doc.modelspace()
+                min_x, min_y, max_x, max_y = calcular_bbox_dxf(item_msp)
+                
+                dxf_width = max_x - min_x
+                dxf_height = max_y - min_y
+
+                # --- Fallback para dimensões fixas se bbox for 0x0 ---
+                if dxf_width == 0.0 and dxf_height == 0.0:
+                    print(f"[WARN] Dimensões de SKU '{sku}' calculadas como 0x0. Usando dimensões fixas: {ITEM_DXF_FIXED_WIDTH_MM}x{ITEM_DXF_FIXED_HEIGHT_MM} mm.")
+                    dxf_width = ITEM_DXF_FIXED_WIDTH_MM
+                    dxf_height = ITEM_DXF_FIXED_HEIGHT_MM
+                    min_x, min_y = 0.0, 0.0 # Assumimos origem (0,0) para fallback
+                # --- Fim do Fallback ---
+
+                entities_to_add = []
+                for entity in item_msp:
+                    entities_to_add.append(entity.copy())
+
+                # Organiza por cor, depois formato, depois furo
+                organized_dxfs_for_current_plan[color_code][format_code][hole_type].append({
+                    'entities': entities_to_add,
+                    'sku': sku,
+                    'bbox_width': dxf_width,
+                    'bbox_height': dxf_height,
+                    'original_min_x': min_x,
+                    'original_min_y': min_y
+                })
+                print(f"[INFO] DXF para SKU '{sku}' (cor: {color_code}, formato: {format_code}, furo: {hole_type}) processado. Dimensões: {dxf_width:.2f}x{dxf_height:.2f} mm")
+
+            except ezdxf.DXFStructureError as e:
+                print(f"[ERROR] Arquivo DXF '{dxf_path_local}' corrompido ou inválido: {e}")
+            except Exception as e:
+                print(f"[ERROR] Erro ao processar DXF '{dxf_path_local}': {e}")
+            finally:
+                if os.path.exists(dxf_path_local):
+                    os.remove(dxf_path_local)
+
+        # --- Posicionar e Inserir DXFs de Itens para o Plano Atual ---
+        current_x_pos = MARGEM_ESQUERDA # Reseta X para cada nova linha de cor
+
+        sorted_colors_for_current_plan = sorted(organized_dxfs_for_current_plan.keys())
+
+        for color_code in sorted_colors_for_current_plan:
+            color_group = organized_dxfs_for_current_plan[color_code]
+            
+            max_height_in_color_line = 0
+            # Encontrar a altura máxima de todos os itens nesta linha de cor (considerando todos os formatos e furos)
+            for format_code_inner in color_group:
+                for hole_type_inner in color_group[format_code_inner]:
+                    for dxf_item in color_group[format_code_inner][hole_type_inner]:
+                        max_height_in_color_line = max(max_height_in_color_line, dxf_item['bbox_height'])
+
+            row_base_y = current_y_cursor - max_height_in_color_line
+            print(f"[DEBUG] Iniciando linha de cor '{color_code}' para plano '{plan_name}'. Altura máx na linha: {max_height_in_color_line:.2f} mm. Base Y da linha: {row_base_y:.2f} mm")
+            
+            sorted_formats_for_current_color = sorted(color_group.keys())
+
+            last_format_code = None # Para controlar a inserção da barra
+            for format_code_inner in sorted_formats_for_current_color:
+                format_group = color_group[format_code_inner]
+                
+                # Inserir Barra.dxf antes de um novo formato (se não for o primeiro formato na linha de cor)
+                if last_format_code is not None: # Se não for o primeiro formato desta linha de cor
+                    if barra_block_name:
+                        current_x_pos += ESPACAMENTO_BARRA_SEPARADORA
+                        # Alinha a base da barra com a base da linha de itens
+                        msp.add_blockref(barra_block_name, insert=(current_x_pos, row_base_y)) 
+                        current_x_pos += BARRA_DXF_WIDTH_MM + ESPACAMENTO_BARRA_SEPARADORA
+                        print(f"[DEBUG] Barra.dxf inserida antes do formato '{format_code_inner}' em X:{current_x_pos - BARRA_DXF_WIDTH_MM - ESPACAMENTO_BARRA_SEPARADORA:.2f}")
+                    else:
+                        current_x_pos += ESPACAMENTO_DXF_FURO_DIFERENTE # Fallback para espaçamento se barra não existir
+                        print(f"[DEBUG] Avançando X para novo formato '{format_code_inner}': {current_x_pos:.2f} mm (sem barra)")
+                
+                sorted_hole_types_for_current_format = sorted(format_group.keys())
+                
+                last_hole_type = None # Para controlar a inserção da barra
+                for hole_type_inner in sorted_hole_types_for_current_format:
+                    hole_type_group = format_group[hole_type_inner]
+                    
+                    # Inserir Barra.dxf antes de um novo furo (se não for o primeiro furo neste formato)
+                    if last_hole_type is not None: # Se não for o primeiro furo deste grupo de formato
+                        if barra_block_name:
+                            current_x_pos += ESPACAMENTO_BARRA_SEPARADORA
+                            # Alinha a base da barra com a base da linha de itens
+                            msp.add_blockref(barra_block_name, insert=(current_x_pos, row_base_y)) 
+                            current_x_pos += BARRA_DXF_WIDTH_MM + ESPACAMENTO_BARRA_SEPARADORA
+                            print(f"[DEBUG] Barra.dxf inserida antes do furo '{hole_type_inner}' em X:{current_x_pos - BARRA_DXF_WIDTH_MM - ESPACAMENTO_BARRA_SEPARADORA:.2f}")
+                        else:
+                            current_x_pos += ESPACAMENTO_DXF_FURO_DIFERENTE # Fallback para espaçamento se barra não existir
+                            print(f"[DEBUG] Avançando X para novo furo '{hole_type_inner}': {current_x_pos:.2f} mm (sem barra)")
+
+                    sorted_hole_type_dxfs = sorted(hole_type_group, key=lambda x: x['sku'])
+
+                    first_dxf_in_group = True
+                    for dxf_item in sorted_hole_type_dxfs:
+                        entities = dxf_item['entities']
+                        sku = dxf_item['sku']
+                        bbox_width = dxf_item['bbox_width']
+                        bbox_height = dxf_item['bbox_height']
+                        original_min_x = dxf_item['original_min_x']
+                        original_min_y = dxf_item['original_min_y']
+
+                        if not first_dxf_in_group:
+                            current_x_pos += ESPACAMENTO_DXF_MESMO_FURO
+                            print(f"[DEBUG] Avançando X para próximo DXF no grupo: {current_x_pos:.2f} mm")
+
+                        offset_x = current_x_pos - original_min_x
+                        offset_y = row_base_y - original_min_y
+
+                        for ent in entities:
+                            new_ent = ent.copy()
+                            new_ent.translate(offset_x, offset_y, 0)
+                            msp.add_entity(new_ent)
+                        
+                        print(f"[DEBUG] Item '{sku}' inserido em X:{current_x_pos:.2f}, Y:{row_base_y:.2f}. Offset: ({offset_x:.2f}, {offset_y:.2f})")
+                        current_x_pos += bbox_width
+                        first_dxf_in_group = False
+                    
+                    last_hole_type = hole_type_inner # Atualiza o último tipo de furo processado
+                last_format_code = format_code_inner # Atualiza o último formato processado
+            
+            current_y_cursor = row_base_y - ESPACAMENTO_LINHA_COR
+            print(f"[DEBUG] Cursor Y após linha de cor '{color_code}' para plano '{plan_name}': {current_y_cursor:.2f} mm (abaixo da linha + espaçamento)")
+        
+        current_y_cursor -= ESPACAMENTO_ENTRE_PLANOS
+        print(f"[DEBUG] Cursor Y após plano '{plan_name}' e seus itens: {current_y_cursor:.2f} mm (abaixo do bloco do plano + espaçamento entre planos)")
+
+
+    # --- 4. Salvar DXF ---
+    final_output_dxf_name = output_filename if output_filename else f"Plano de Gravação {datetime.datetime.now().strftime('%d-%m-%Y_%H%M%S')}.dxf"
+    
+    caminho_saida_dxf = f"/tmp/{final_output_dxf_name}"
+    
+    os.makedirs(os.path.dirname(caminho_saida_dxf) or '.', exist_ok=True)
+    doc.saveas(caminho_saida_dxf)
+    print(f"[INFO] DXF de saída salvo: {caminho_saida_dxf}")
+
+    return caminho_saida_dxf
 
