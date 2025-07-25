@@ -83,6 +83,7 @@ async def compor_plano(entrada: EntradaComposicao):
     # Variáveis para controlar o posicionamento vertical global
     current_y_offset_global = 0.0 # Começa do fundo do documento e cresce para cima
     max_overall_width = 0.0
+    all_failed_ids = [] # Lista para coletar todos os IDs de arquivo que falharam em qualquer plano
 
     # Ordena os planos pelo nome para garantir uma ordem consistente (ex: 01, 02, A, B)
     sorted_plans = sorted(entrada.plans, key=lambda p: p.plan_name)
@@ -93,18 +94,23 @@ async def compor_plano(entrada: EntradaComposicao):
             
             try:
                 # Gera os dados do layout para um único plano
-                entities_with_relative_coords, layout_width, layout_height = \
+                # Agora retorna também a lista de IDs de arquivos que falharam neste plano
+                entities_with_relative_coords, layout_width, layout_height, failed_ids_current_plan = \
                     generate_single_plan_layout_data(
                         file_ids_and_skus=[item.model_dump() for item in plan_data.items],
                         plan_name=plan_data.plan_name,
                         drive_folder_id=entrada.id_pasta_entrada_drive
                     )
                 
-                # Se a função retornar sem levantar exceção, mas a lista de entidades estiver vazia,
-                # isso é um problema. No novo dxf_layout_engine, isso levantaria NoEntitiesFoundError.
+                # Adiciona os IDs falhos deste plano à lista geral de falhas
+                all_failed_ids.extend(failed_ids_current_plan)
+
+                # Se a função retornou, mas não há entidades (após pular falhas),
+                # isso significa que o plano não pôde ser gerado.
                 if not entities_with_relative_coords:
-                    print(f"[WARN] Plano '{plan_data.plan_name}' não gerou entidades visíveis. Pulando.")
-                    continue # Ou levantar um erro mais específico aqui se cada plano for crítico
+                    print(f"[WARN] Plano '{plan_data.plan_name}' não gerou entidades visíveis após processar itens. Pulando este plano.")
+                    # Não levantamos um erro fatal aqui, pois queremos continuar com outros planos.
+                    continue 
 
                 # Atualiza a largura máxima geral do documento
                 max_overall_width = max(max_overall_width, layout_width)
@@ -125,20 +131,25 @@ async def compor_plano(entrada: EntradaComposicao):
                 current_y_offset_global += layout_height + ESPACAMENTO_LINHA_COR # Reutiliza ESPACAMENTO_LINHA_COR para planos
 
             except NoEntitiesFoundError as e:
-                print(f"[ERROR] Erro na geração do layout para o plano '{plan_data.plan_name}': {e}")
-                # Se um plano específico não gerou entidades, consideramos uma falha para a requisição inteira.
-                # Isso impede a geração de um DXF incompleto ou vazio.
-                raise HTTPException(status_code=400, detail=f"Falha ao gerar layout para o plano '{plan_data.plan_name}': {e}")
+                # Esta exceção agora só é levantada se o plano inteiro não tiver entidades válidas
+                print(f"[ERROR] Erro na geração do layout para o plano '{plan_data.plan_name}': {e}. Este plano será ignorado no DXF final.")
+                # Adiciona todos os IDs de arquivo do plano atual à lista de falhas, pois o plano não foi gerado
+                all_failed_ids.extend([item.id_arquivo_drive for item in plan_data.items])
+                continue # Continua para o próximo plano, pois queremos um DXF parcial se possível
             except FileNotFoundError as e:
-                print(f"[ERROR] Erro de arquivo não encontrado para o plano '{plan_data.plan_name}': {e}")
-                raise HTTPException(status_code=404, detail=f"Arquivo necessário não encontrado para o plano '{plan_data.plan_name}': {e}")
+                print(f"[ERROR] Erro de arquivo não encontrado para o plano '{plan_data.plan_name}': {e}. Este plano será ignorado no DXF final.")
+                all_failed_ids.extend([item.id_arquivo_drive for item in plan_data.items])
+                continue
             except Exception as e:
-                print(f"[ERROR] Erro inesperado ao processar plano '{plan_data.plan_name}': {e}")
-                raise HTTPException(status_code=500, detail=f"Erro interno ao processar plano '{plan_data.plan_name}': {e}")
+                print(f"[ERROR] Erro inesperado ao processar plano '{plan_data.plan_name}': {e}. Este plano será ignorado no DXF final.")
+                all_failed_ids.extend([item.id_arquivo_drive for item in plan_data.items])
+                continue
 
         # Verifica se alguma entidade foi realmente adicionada ao documento principal
         if not msp:
-            raise HTTPException(status_code=400, detail="Nenhuma entidade DXF válida foi gerada para nenhum dos planos fornecidos.")
+            # Se, após tentar processar todos os planos, o modelspace ainda estiver vazio,
+            # significa que nenhum DXF válido pôde ser gerado.
+            raise HTTPException(status_code=400, detail="Nenhuma entidade DXF válida foi gerada para nenhum dos planos fornecidos. Verifique os SKUs e IDs dos arquivos.")
 
         # Nome do arquivo de saída
         if entrada.output_filename:
@@ -173,6 +184,7 @@ async def compor_plano(entrada: EntradaComposicao):
         return {
             "message": "Plano de corte DXF composto e enviado ao Google Drive com sucesso!",
             "dxf_url": url_dxf,
+            "failed_items": all_failed_ids # Retorna a lista de IDs de arquivo que falharam
         }
 
     except HTTPException as e:
