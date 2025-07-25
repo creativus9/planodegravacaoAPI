@@ -1,10 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional, Dict
+from typing import List, Optional, Tuple, Any
+import os
+import datetime
+import ezdxf # Importa ezdxf aqui
 
 # Importações das funções de composição DXF e de interação com o Google Drive
-from dxf_layout_engine import compor_dxf_personalizado # Importação corrigida
+from dxf_layout_engine import generate_single_plan_layout_data, FOLHA_LARGURA_MM, ESPACAMENTO_LINHA_COR # Importa a nova função e constantes
 from google_drive_utils import upload_to_drive, mover_arquivos_antigos, buscar_arquivo_personalizado_por_id_e_sku
 
 app = FastAPI()
@@ -38,8 +41,6 @@ class ItemEntrada(BaseModel):
 class PlanData(BaseModel):
     """
     Define o modelo de dados para cada plano de corte dentro da requisição.
-    - plan_name: O nome do plano de corte (ex: "01", "A").
-    - items: Lista de objetos ItemEntrada associados a este plano.
     """
     plan_name: str = Field(..., description="Nome do plano de corte (ex: '01', 'A').")
     items: List[ItemEntrada] = Field(..., min_items=1, description="Lista de itens DXF para este plano.")
@@ -47,8 +48,7 @@ class PlanData(BaseModel):
 class EntradaComposicao(BaseModel):
     """
     Define o modelo de dados para a entrada da requisição POST para composição.
-    Agora aceita uma lista de planos, cada um com seus itens.
-    - plans: Lista de objetos PlanData.
+    - plans: Lista de objetos PlanData, cada um representando um plano de corte.
     - id_pasta_entrada_drive: O ID da pasta do Google Drive de onde os arquivos DXF personalizados são lidos.
     - id_pasta_saida_drive: O ID da pasta do Google Drive onde o DXF gerado será salvo.
     - output_filename: Opcional. Nome do arquivo DXF de saída. Se não fornecido, será gerado automaticamente.
@@ -62,46 +62,98 @@ class EntradaComposicao(BaseModel):
 @app.post("/compor-plano")
 async def compor_plano(entrada: EntradaComposicao):
     """
-    Endpoint para compor um novo arquivo DXF
-    baseado nos múltiplos planos e itens fornecidos.
-    O arquivo resultante é enviado para o Google Drive.
+    Endpoint para compor um novo arquivo DXF combinando múltiplos planos de corte,
+    organizando-os verticalmente. O arquivo DXF resultante é enviado para a pasta
+    de saída especificada no Google Drive.
     """
     if not entrada.plans:
         raise HTTPException(status_code=400, detail="Nenhum plano fornecido para composição.")
 
-    print(f"[INFO] Iniciando composição para {len(entrada.plans)} planos.")
+    print(f"[INFO] Iniciando composição de múltiplos planos.")
     print(f"[INFO] ID da pasta de entrada do Drive: {entrada.id_pasta_entrada_drive}")
     print(f"[INFO] ID da pasta de saída do Drive: {entrada.id_pasta_saida_drive}")
+    print(f"[INFO] Total de planos a processar: {len(entrada.plans)}")
     if entrada.output_filename:
         print(f"[INFO] Nome de arquivo de saída especificado: {entrada.output_filename}")
 
-    try:
-        # Chama a função principal de composição
-        # Agora passa a lista completa de planos e espera apenas o caminho do DXF
-        caminho_dxf_saida = compor_dxf_personalizado(
-            plans=[plan.model_dump() for plan in entrada.plans], # Passa como lista de dicionários
-            drive_folder_id=entrada.id_pasta_entrada_drive, # Usa a pasta de entrada para baixar
-            output_filename=entrada.output_filename # Passa o nome de arquivo opcional
-        )
+    # Cria um novo documento DXF principal
+    doc = ezdxf.new('R2010')
+    msp = doc.modelspace()
 
+    # Variáveis para controlar o posicionamento vertical global
+    current_y_offset_global = 0.0 # Começa do fundo do documento e cresce para cima
+    max_overall_width = 0.0
+
+    # Ordena os planos pelo nome para garantir uma ordem consistente (ex: 01, 02, A, B)
+    sorted_plans = sorted(entrada.plans, key=lambda p: p.plan_name)
+
+    try:
+        for i, plan_data in enumerate(sorted_plans):
+            print(f"[INFO] Processando plano '{plan_data.plan_name}' ({i+1}/{len(sorted_plans)})...")
+            
+            # Gera os dados do layout para um único plano
+            entities_with_relative_coords, layout_width, layout_height = \
+                generate_single_plan_layout_data(
+                    file_ids_and_skus=[item.model_dump() for item in plan_data.items],
+                    plan_name=plan_data.plan_name,
+                    drive_folder_id=entrada.id_pasta_entrada_drive
+                )
+            
+            if not entities_with_relative_coords:
+                print(f"[WARN] Plano '{plan_data.plan_name}' não gerou entidades. Pulando.")
+                continue
+
+            # Atualiza a largura máxima geral do documento
+            max_overall_width = max(max_overall_width, layout_width)
+
+            # Adiciona as entidades do plano atual ao modelspace principal, com o offset vertical
+            for ent, x_rel, y_rel in entities_with_relative_coords:
+                # O (x_rel, y_rel) já é relativo ao canto inferior esquerdo do layout do plano.
+                # Precisamos transladar para a posição global no documento principal.
+                # current_y_offset_global é a base Y para o plano atual.
+                new_ent = ent.copy() # Copia a entidade novamente para o novo documento
+                new_ent.translate(0, current_y_offset_global, 0) # Aplica o offset vertical
+                msp.add_entity(new_ent)
+                
+            print(f"[DEBUG] Plano '{plan_data.plan_name}' adicionado ao DXF principal na altura Y: {current_y_offset_global:.2f} mm.")
+
+            # Atualiza o offset Y global para o próximo plano
+            # Adiciona a altura do layout do plano atual mais um espaçamento entre planos
+            current_y_offset_global += layout_height + ESPACAMENTO_LINHA_COR # Reutiliza ESPACAMENTO_LINHA_COR para planos
+
+        # Nome do arquivo de saída
+        if entrada.output_filename:
+            output_dxf_name = entrada.output_filename
+        else:
+            timestamp = datetime.datetime.now().strftime("%d-%m-%Y_%H%M%S")
+            # Gera um nome de arquivo com todos os planos envolvidos
+            plan_names_in_filename = " - ".join(p.plan_name for p in sorted_plans)
+            output_dxf_name = f"Plano de Gravação {plan_names_in_filename} {timestamp}.dxf"
+
+        # Caminho temporário para salvar localmente antes do upload
+        caminho_saida_dxf = f"/tmp/{output_dxf_name}"
+
+        os.makedirs(os.path.dirname(caminho_saida_dxf) or '.', exist_ok=True)
+        doc.saveas(caminho_saida_dxf)
+        print(f"[INFO] DXF de saída salvo: {caminho_saida_dxf}")
+        
         # Faz o upload do arquivo DXF gerado para o Google Drive
         url_dxf = upload_to_drive(
-            caminho_dxf_saida,
-            os.path.basename(caminho_dxf_saida), # Usa o nome base do arquivo salvo localmente
+            caminho_saida_dxf,
+            os.path.basename(caminho_saida_dxf),
             "application/dxf",
-            entrada.id_pasta_saida_drive # Usa a pasta de saída para fazer upload
+            entrada.id_pasta_saida_drive
         )
-        
-        # Limpa o arquivo temporário após o upload
-        if os.path.exists(caminho_dxf_saida):
-            os.remove(caminho_dxf_saida)
-            print(f"[INFO] Arquivo temporário DXF removido: {caminho_dxf_saida}")
 
-        print(f"[INFO] Composição concluída com sucesso.")
+        # Limpa o arquivo temporário após o upload
+        if os.path.exists(caminho_saida_dxf):
+            os.remove(caminho_saida_dxf)
+            print(f"[INFO] Arquivo temporário DXF removido: {caminho_saida_dxf}")
+
+        print(f"[INFO] Composição de múltiplos planos concluída com sucesso.")
         return {
-            "message": "Plano(s) de corte DXF composto(s) e enviado(s) ao Google Drive com sucesso!",
+            "message": "Plano de corte DXF composto e enviado ao Google Drive com sucesso!",
             "dxf_url": url_dxf,
-            # PNG URL removida
         }
 
     except FileNotFoundError as e:
@@ -129,4 +181,3 @@ async def mover_antigos_endpoint(id_pasta_drive: str):
 @app.get("/")
 async def root():
     return {"message": "API de Composição DXF e Gerenciamento de Drive está online!"}
-
