@@ -14,10 +14,9 @@ app = FastAPI()
 # --- Configuração CORS ---
 origins = [
     "http://localhost",
-    "http://localhost:5173", # O endereço padrão do seu frontend React em desenvolvimento
-    # Adicione a URL do seu Railway aqui quando o deploy for feito:
-    # "https://sua-aplicacao-railway.up.railway.app",
-    "https://script.google.com", # Para permitir requisições do Google Apps Script
+    "http://localhost:5173",
+    "https://web-production-ba02.up.railway.app", # Adicione esta linha
+    "https://script.google.com",
 ]
 
 app.add_middleware(
