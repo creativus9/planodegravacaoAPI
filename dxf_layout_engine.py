@@ -144,7 +144,8 @@ def generate_single_plan_layout_data(
 
     # Usaremos um documento temporário para calcular as posições relativas
     # e depois copiaremos as entidades para o documento principal no main.py
-    temp_doc = ezdxf.new('R2010') 
+    temp_doc = ezdxf.new('R2010')
+    temp_doc.header['$INSUNITS'] = 4  # Define a unidade como Milímetros (4)
     temp_msp = temp_doc.modelspace()
 
     # Estrutura para organizar os DXFs por cor, formato, tamanho e furo
@@ -411,7 +412,7 @@ def generate_single_plan_layout_data(
                         current_x_pos += barra_width + ESPACAMENTO_SEPARADOR_POST_BARRA + ADJUSTMENT_OFFSET_BARRA_MM
                     else:
                         current_x_pos += ESPACAMENTO_DXF_MESMO_FURO
-                    print(f"[DEBUG] current_x_pos após barra (ou fallback) e espaçamento: {current_x_pos:.2f} mm")
+                    print(f"DEBUG: current_x_pos após barra (ou fallback) e espaçamento: {current_x_pos:.2f} mm")
 
                 sorted_hole_types = sorted(size_group.keys())
                 first_hole_type_in_size = True
@@ -433,7 +434,7 @@ def generate_single_plan_layout_data(
                             current_x_pos += barra_width + ESPACAMENTO_SEPARADOR_POST_BARRA + ADJUSTMENT_OFFSET_BARRA_MM
                         else:
                             current_x_pos += ESPACAMENTO_DXF_MESMO_FURO
-                        print(f"[DEBUG] current_x_pos após barra (ou fallback) e espaçamento: {current_x_pos:.2f} mm")
+                        print(f"DEBUG: current_x_pos após barra (ou fallback) e espaçamento: {current_x_pos:.2f} mm")
                     
                     # Ordenar DXFs dentro do grupo de furo (opcional, mas bom para consistência)
                     sorted_hole_type_dxfs = sorted(hole_type_group, key=lambda x: x['sku'])
