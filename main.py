@@ -9,7 +9,7 @@ import ezdxf # Importa ezdxf aqui
 
 # Importações das funções de composição DXF e de interação com o Google Drive
 from dxf_layout_engine import generate_single_plan_layout_data, FOLHA_LARGURA_MM, ESPACAMENTO_LINHA_COR, NoEntitiesFoundError # Importa a nova função, constantes e a exceção
-from google_drive_utils import upload_to_drive, mover_arquivos_antigos, buscar_arquivo_personalizado_por_id_e_sku, esvaziar_lixeira_drive
+from google_drive_utils import upload_to_drive, mover_arquivos_antigos, buscar_arquivo_personalizado_por_id_e_sku, esvaziar_lixeira_drive, deletar_todos_os_arquivos
 
 app = FastAPI()
 
@@ -225,6 +225,22 @@ async def esvaziar_lixeira_endpoint():
     except Exception as e:
         print(f"[ERROR] Falha ao tentar esvaziar a lixeira: {e}")
         raise HTTPException(status_code=500, detail=f"Erro ao esvaziar a lixeira: {e}")
+
+@app.post("/deletar-tudo")
+async def deletar_tudo_endpoint():
+    """
+    !!! CUIDADO: ENDPOINT DESTRUTIVO !!!
+    Endpoint para excluir permanentemente TODOS os arquivos (não pastas) que pertencem
+    à conta de serviço no Google Drive. Esta ação é IRREVERSÍVEL.
+    Use para liberar espaço quando a conta estiver cheia e a limpeza da lixeira não for suficiente.
+    """
+    print("[WARN] Requisição para DELETAR TODOS OS ARQUIVOS da conta de serviço recebida.")
+    try:
+        deleted_count = deletar_todos_os_arquivos()
+        return {"message": f"Operação concluída. {deleted_count} arquivos foram excluídos permanentemente da conta de serviço."}
+    except Exception as e:
+        print(f"[FATAL] Falha catastrófica ao tentar deletar todos os arquivos: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro ao deletar todos os arquivos: {e}")
 
 @app.get("/")
 async def root():
