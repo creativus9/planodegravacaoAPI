@@ -221,3 +221,17 @@ def arquivo_existe_drive(nome_arquivo: str, drive_folder_id: str = DEFAULT_FOLDE
     except Exception as e:
         print(f"[ERROR] Erro inesperado ao verificar existência de '{nome_arquivo}' no Drive: {e}")
         return False
+
+def esvaziar_lixeira_drive():
+    """
+    Esvazia permanentemente a lixeira do usuário (neste caso, a conta de serviço).
+    """
+    try:
+        print("[INFO] Tentando esvaziar a lixeira do Google Drive...")
+        drive_service.files().emptyTrash().execute()
+        print("[INFO] Lixeira do Google Drive esvaziada com sucesso.")
+    except HttpError as error:
+        raise Exception(f"Erro ao esvaziar a lixeira do Drive: {error}")
+    except Exception as e:
+        raise Exception(f"Erro inesperado ao esvaziar a lixeira do Drive: {e}")
+
