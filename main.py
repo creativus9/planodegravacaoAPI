@@ -1,3 +1,4 @@
+# Cole seu código aqui
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,7 +9,7 @@ import ezdxf # Importa ezdxf aqui
 
 # Importações das funções de composição DXF e de interação com o Google Drive
 from dxf_layout_engine import generate_single_plan_layout_data, FOLHA_LARGURA_MM, ESPACAMENTO_LINHA_COR, NoEntitiesFoundError # Importa a nova função, constantes e a exceção
-from google_drive_utils import upload_to_drive, mover_arquivos_antigos, buscar_arquivo_personalizado_por_id_e_sku
+from google_drive_utils import upload_to_drive, mover_arquivos_antigos, buscar_arquivo_personalizado_por_id_e_sku, esvaziar_lixeira_drive
 
 app = FastAPI()
 
@@ -212,6 +213,20 @@ async def mover_antigos_endpoint(id_pasta_drive: str):
         print(f"[ERROR] Erro ao mover arquivos antigos: {e}")
         raise HTTPException(status_code=500, detail=f"Erro ao mover arquivos antigos: {e}")
 
+@app.post("/esvaziar-lixeira")
+async def esvaziar_lixeira_endpoint():
+    """
+    Endpoint para esvaziar permanentemente a lixeira da conta de serviço no Google Drive.
+    """
+    print("[INFO] Requisição para esvaziar a lixeira do Drive recebida.")
+    try:
+        esvaziar_lixeira_drive()
+        return {"message": "Lixeira do Google Drive esvaziada com sucesso."}
+    except Exception as e:
+        print(f"[ERROR] Falha ao tentar esvaziar a lixeira: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro ao esvaziar a lixeira: {e}")
+
 @app.get("/")
 async def root():
     return {"message": "API de Composição DXF e Gerenciamento de Drive está online!"}
+
