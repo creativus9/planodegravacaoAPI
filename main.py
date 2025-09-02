@@ -1,239 +1,232 @@
+# Cole seu código aqui
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+from fastapi.middleware.cors import CORSMiddleware
+from typing import List, Optional, Tuple, Any
 import os
-import shutil
-import tempfile
-import re
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
-from typing import List, Dict
-from datetime import datetime, timedelta, timezone
-from dateutil.parser import isoparse
+import datetime
+import ezdxf # Importa ezdxf aqui
 
-# Adicionando prints para depuração no início
-print("DEBUG: main.py - Início do carregamento do módulo.")
-
-# Importa as funções utilitárias e de Google Drive
-try:
-    from google_drive_utils import (
-        get_drive_service,
-        upload_to_drive,
-        mover_arquivos_antigos,
-        esvaziar_lixeira_drive,
-        listar_todos_arquivos_com_detalhes,
-        excluir_arquivo_drive
-    )
-    print("DEBUG: main.py - google_drive_utils importado com sucesso.")
-except ImportError as e:
-    print(f"ERROR: main.py - Falha ao importar google_drive_utils: {e}")
-    raise
-
-try:
-    from dxf_layout_engine import (
-        generate_single_plan_layout_data, 
-        NoEntitiesFoundError
-    )
-    print("DEBUG: main.py - dxf_layout_engine importado com sucesso.")
-except ImportError as e:
-    print(f"ERROR: main.py - Falha ao importar dxf_layout_engine: {e}")
-    raise
-
-# Importa ezdxf para a composição final
-try:
-    import ezdxf
-    print("DEBUG: main.py - ezdxf importado com sucesso.")
-except ImportError as e:
-    print(f"ERROR: main.py - Falha ao importar ezdxf: {e}")
-    raise
-
-print("DEBUG: main.py - Todas as importações foram concluídas.")
+# Importações das funções de composição DXF e de interação com o Google Drive
+from dxf_layout_engine import generate_single_plan_layout_data, FOLHA_LARGURA_MM, ESPACAMENTO_LINHA_COR, NoEntitiesFoundError # Importa a nova função, constantes e a exceção
+from google_drive_utils import upload_to_drive, mover_arquivos_antigos, buscar_arquivo_personalizado_por_id_e_sku, esvaziar_lixeira_drive
 
 app = FastAPI()
 
-# --- Modelos de Dados Pydantic ---
-class DXFItem(BaseModel):
-    id_arquivo_drive: str
-    sku: str
+# --- Configuração CORS ---
+origins = [
+    "http://localhost",
+    "http://localhost:5173", # O endereço padrão do seu frontend React em desenvolvimento
+    "https://web-production-ba02.up.railway.app", # Adicionado a URL do seu Railway
+    "https://script.google.com", # Para permitir requisições do Google Apps Script
+]
 
-class Plan(BaseModel):
-    plan_name: str
-    items: List[DXFItem]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# --- Fim da Configuração CORS ---
 
-class CompositionRequest(BaseModel):
-    plans: List[Plan]
-    id_pasta_entrada_drive: str
-    id_pasta_saida_drive: str
-    output_filename: str
+class ItemEntrada(BaseModel):
+    """
+    Define o modelo de dados para cada item DXF a ser composto.
+    - id_arquivo_drive: O ID do arquivo DXF no Google Drive.
+    - sku: O SKU completo do item (ex: PLAC-3010-2FH-AC-DOU-070-00000).
+    """
+    id_arquivo_drive: str = Field(..., description="ID do arquivo DXF no Google Drive.")
+    sku: str = Field(..., description="SKU completo do item (ex: PLAC-3010-2FH-AC-DOU-070-00000).")
 
-# IDs de pastas para manutenção
-ID_PASTA_SAIDA_DRIVE = "18RIUiRS7SugpUeGOIAxu3gVj9D6-MD2G"
-ID_PASTA_ANTIGOS_DRIVE = "1sCb7g9L4I9lJeY-9N-yJj2L92s-YPMi9"
-ID_PASTA_PLANOS_DE_CORTE = "18RIUiRS7SugpUeGOIAxu3gVj9D6-MD2G" # Pasta para limpar arquivos mortos
+class PlanData(BaseModel):
+    """
+    Define o modelo de dados para cada plano de corte dentro da requisição.
+    """
+    plan_name: str = Field(..., description="Nome do plano de corte (ex: '01', 'A').")
+    items: List[ItemEntrada] = Field(..., min_items=1, description="Lista de itens DXF para este plano.")
 
-@app.get("/")
-def read_root():
-    return {"message": "API de Composição DXF está operacional."}
+class EntradaComposicao(BaseModel):
+    """
+    Define o modelo de dados para a entrada da requisição POST para composição.
+    - plans: Lista de objetos PlanData, cada um representando um plano de corte.
+    - id_pasta_entrada_drive: O ID da pasta do Google Drive de onde os arquivos DXF personalizados são lidos.
+    - id_pasta_saida_drive: O ID da pasta do Google Drive onde o DXF gerado será salvo.
+    - output_filename: Opcional. Nome do arquivo DXF de saída. Se não fornecido, será gerado automaticamente.
+    """
+    plans: List[PlanData] = Field(..., min_items=1, description="Lista de planos de corte a serem compostos.")
+    id_pasta_entrada_drive: str = Field(..., description="ID da pasta do Google Drive de onde os arquivos DXF personalizados são lidos.")
+    id_pasta_saida_drive: str = Field(..., description="ID da pasta do Google Drive onde o DXF gerado será salvo.")
+    output_filename: Optional[str] = Field(None, description="Nome do arquivo DXF de saída. Se não fornecido, será gerado automaticamente.")
+
 
 @app.post("/compor-plano")
-async def compor_plano_de_corte(request_data: CompositionRequest):
-    print(f"[INFO] Recebida nova requisição para compor plano: {request_data.output_filename}")
-    
-    # --- Criação de um Documento DXF Final ---
-    final_doc = ezdxf.new('R2010')
-    final_doc.header['$INSUNITS'] = 4  # Milímetros
-    final_msp = final_doc.modelspace()
-    
-    current_x_offset = 0 # Offset horizontal para posicionar os planos
-    ESPACAMENTO_ENTRE_PLANOS = 500.0 # Espaçamento em mm
-    
-    failed_items_global = [] # Lista para acumular todos os IDs de itens que falharam
-    
-    for plan_data in sorted(request_data.plans, key=lambda p: p.plan_name):
-        plan_name = plan_data.plan_name
-        items = [{'id_arquivo_drive': item.id_arquivo_drive, 'sku': item.sku} for item in plan_data.items]
-        
-        print(f"[INFO] Processando plano: {plan_name}")
-        
-        try:
-            # Gera as entidades e posições relativas para o plano atual
-            (
-                relative_entities_with_coords, 
-                layout_width, 
-                layout_height,
-                failed_ids_this_plan
-            ) = generate_single_plan_layout_data(
-                file_ids_and_skus=items,
-                plan_name=plan_name,
-                drive_folder_id=request_data.id_pasta_entrada_drive,
-            )
-            
-            # Adiciona os IDs que falharam neste plano à lista global
-            if failed_ids_this_plan:
-                failed_items_global.extend(failed_ids_this_plan)
+async def compor_plano(entrada: EntradaComposicao):
+    """
+    Endpoint para compor um novo arquivo DXF combinando múltiplos planos de corte,
+    organizando-os verticalmente. O arquivo DXF resultante é enviado para a pasta
+    de saída especificada no Google Drive.
+    """
+    if not entrada.plans:
+        raise HTTPException(status_code=400, detail="Nenhum plano fornecido para composição.")
 
-            # Adiciona as entidades ao MSP final, aplicando o offset horizontal
-            for ent, _, _ in relative_entities_with_coords:
-                ent.translate(current_x_offset, 0, 0)
-                final_msp.add_entity(ent)
-            
-            # Atualiza o offset para o próximo plano
-            current_x_offset += layout_width + ESPACAMENTO_ENTRE_PLANOS
-            print(f"[INFO] Plano '{plan_name}' adicionado ao layout final. Largura: {layout_width:.2f}, Altura: {layout_height:.2f}")
+    print(f"[INFO] Iniciando composição de múltiplos planos.")
+    print(f"[INFO] ID da pasta de entrada do Drive: {entrada.id_pasta_entrada_drive}")
+    print(f"[INFO] ID da pasta de saída do Drive: {entrada.id_pasta_saida_drive}")
+    print(f"[INFO] Total de planos a processar: {len(entrada.plans)}")
+    if entrada.output_filename:
+        print(f"[INFO] Nome de arquivo de saída especificado: {entrada.output_filename}")
 
-        except NoEntitiesFoundError as e:
-            print(f"[WARN] Plano '{plan_name}' ignorado: {e}")
-            # Adiciona todos os IDs de itens deste plano à lista de falhas, pois o plano não foi gerado
-            failed_items_global.extend([item['id_arquivo_drive'] for item in items])
-            continue # Pula para o próximo plano
-        except Exception as e:
-            print(f"[ERROR] Erro inesperado ao gerar layout para o plano '{plan_name}': {e}")
-            failed_items_global.extend([item['id_arquivo_drive'] for item in items])
-            continue # Pula para o próximo plano
+    # Cria um novo documento DXF principal
+    doc = ezdxf.new('R2010')
+    msp = doc.modelspace()
 
-    # --- Salvar e Fazer Upload do DXF Final ---
-    temp_dir = tempfile.mkdtemp()
-    final_dxf_path = os.path.join(temp_dir, request_data.output_filename)
-    
+    # Variáveis para controlar o posicionamento vertical global
+    current_y_offset_global = 0.0 # Começa do fundo do documento e cresce para cima
+    max_overall_width = 0.0
+    all_failed_ids = [] # Lista para coletar todos os IDs de arquivo que falharam em qualquer plano
+
+    # Ordena os planos pelo nome para garantir uma ordem consistente (ex: 01, 02, A, B)
+    sorted_plans = sorted(entrada.plans, key=lambda p: p.plan_name)
+
     try:
-        final_doc.saveas(final_dxf_path)
-        print(f"[INFO] DXF final '{request_data.output_filename}' salvo temporariamente em '{final_dxf_path}'.")
-        
-        # Faz o upload para o Google Drive
-        file_id, web_view_link = upload_to_drive(final_dxf_path, request_data.id_pasta_saida_drive)
-        
-        # Limpa o diretório temporário
-        shutil.rmtree(temp_dir)
-        
-        return {
-            "message": "DXF composto e enviado para o Google Drive com sucesso!",
-            "dxf_url": web_view_link,
-            "file_id": file_id,
-            "failed_items": list(set(failed_items_global)) # Remove duplicatas antes de retornar
-        }
-    except Exception as e:
-        # Limpa o diretório temporário em caso de erro
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        print(f"[ERROR] Erro ao salvar ou fazer upload do DXF final: {e}")
-        raise HTTPException(status_code=500, detail=f"Erro ao finalizar o processo DXF: {e}")
+        for i, plan_data in enumerate(sorted_plans):
+            print(f"[INFO] Processando plano '{plan_data.plan_name}' ({i+1}/{len(sorted_plans)})...")
+            
+            try:
+                # Gera os dados do layout para um único plano
+                # Agora retorna também a lista de IDs de arquivos que falharam neste plano
+                entities_with_relative_coords, layout_width, layout_height, failed_ids_current_plan = \
+                    generate_single_plan_layout_data(
+                        file_ids_and_skus=[item.model_dump() for item in plan_data.items],
+                        plan_name=plan_data.plan_name,
+                        drive_folder_id=entrada.id_pasta_entrada_drive
+                    )
+                
+                # Adiciona os IDs falhos deste plano à lista geral de falhas
+                all_failed_ids.extend(failed_ids_current_plan)
 
-@app.post("/mover-antigos")
-async def mover_antigos():
-    drive_service = get_drive_service()
-    if not drive_service:
-        raise HTTPException(status_code=500, detail="Falha ao autenticar com o Google Drive.")
-    
-    moved_count = mover_arquivos_antigos(drive_service, ID_PASTA_SAIDA_DRIVE, ID_PASTA_ANTIGOS_DRIVE)
-    return {"message": f"{moved_count} arquivos foram movidos.", "moved": moved_count}
+                # Se a função retornou, mas não há entidades (após pular falhas),
+                # isso significa que o plano não pôde ser gerado.
+                if not entities_with_relative_coords:
+                    print(f"[WARN] Plano '{plan_data.plan_name}' não gerou entidades visíveis após processar itens. Pulando este plano.")
+                    # Não levantamos um erro fatal aqui, pois queremos continuar com outros planos.
+                    continue 
+
+                # Atualiza a largura máxima geral do documento
+                max_overall_width = max(max_overall_width, layout_width)
+
+                # Adiciona as entidades do plano atual ao modelspace principal, com o offset vertical
+                for ent, x_rel, y_rel in entities_with_relative_coords:
+                    # O (x_rel, y_rel) já é relativo ao canto inferior esquerdo do layout do plano.
+                    # Precisamos transladar para a posição global no documento principal.
+                    # current_y_offset_global é a base Y para o plano atual.
+                    new_ent = ent.copy() # Copia a entidade novamente para o novo documento
+                    new_ent.translate(0, current_y_offset_global, 0) # Aplica o offset vertical
+                    msp.add_entity(new_ent)
+                    
+                print(f"[DEBUG] Plano '{plan_data.plan_name}' adicionado ao DXF principal na altura Y: {current_y_offset_global:.2f} mm.")
+
+                # Atualiza o offset Y global para o próximo plano
+                # Adiciona a altura do layout do plano atual mais um espaçamento entre planos
+                current_y_offset_global += layout_height + ESPACAMENTO_LINHA_COR # Reutiliza ESPACAMENTO_LINHA_COR para planos
+
+            except NoEntitiesFoundError as e:
+                # Esta exceção agora só é levantada se o plano inteiro não tiver entidades válidas
+                print(f"[ERROR] Erro na geração do layout para o plano '{plan_data.plan_name}': {e}. Este plano será ignorado no DXF final.")
+                # Adiciona todos os IDs de arquivo do plano atual à lista de falhas, pois o plano não foi gerado
+                all_failed_ids.extend([item.id_arquivo_drive for item in plan_data.items])
+                continue # Continua para o próximo plano, pois queremos um DXF parcial se possível
+            except FileNotFoundError as e:
+                print(f"[ERROR] Erro de arquivo não encontrado para o plano '{plan_data.plan_name}': {e}. Este plano será ignorado no DXF final.")
+                all_failed_ids.extend([item.id_arquivo_drive for item in plan_data.items])
+                continue
+            except Exception as e:
+                print(f"[ERROR] Erro inesperado ao processar plano '{plan_data.plan_name}': {e}. Este plano será ignorado no DXF final.")
+                all_failed_ids.extend([item.id_arquivo_drive for item in plan_data.items])
+                continue
+
+        # Verifica se alguma entidade foi realmente adicionada ao documento principal
+        if not msp:
+            # Se, após tentar processar todos os planos, o modelspace ainda estiver vazio,
+            # significa que nenhum DXF válido pôde ser gerado.
+            raise HTTPException(status_code=400, detail="Nenhuma entidade DXF válida foi gerada para nenhum dos planos fornecidos. Verifique os SKUs e IDs dos arquivos.")
+
+        # Nome do arquivo de saída
+        if entrada.output_filename:
+            output_dxf_name = entrada.output_filename
+        else:
+            timestamp = datetime.datetime.now().strftime("%d-%m-%Y_%H%M%S")
+            # Gera um nome de arquivo com todos os planos envolvidos
+            plan_names_in_filename = " - ".join(p.plan_name for p in sorted_plans)
+            output_dxf_name = f"Plano de Gravação {plan_names_in_filename} {timestamp}.dxf"
+
+        # Caminho temporário para salvar localmente antes do upload
+        caminho_saida_dxf = f"/tmp/{output_dxf_name}"
+
+        os.makedirs(os.path.dirname(caminho_saida_dxf) or '.', exist_ok=True)
+        doc.saveas(caminho_saida_dxf)
+        print(f"[INFO] DXF de saída salvo: {caminho_saida_dxf}")
+        
+        # Faz o upload do arquivo DXF gerado para o Google Drive
+        url_dxf = upload_to_drive(
+            caminho_saida_dxf,
+            os.path.basename(caminho_saida_dxf),
+            "application/dxf",
+            entrada.id_pasta_saida_drive
+        )
+
+        # Limpa o arquivo temporário após o upload
+        if os.path.exists(caminho_saida_dxf):
+            os.remove(caminho_saida_dxf)
+            print(f"[INFO] Arquivo temporário DXF removido: {caminho_saida_dxf}")
+
+        print(f"[INFO] Composição de múltiplos planos concluída com sucesso.")
+        return {
+            "message": "Plano de corte DXF composto e enviado ao Google Drive com sucesso!",
+            "dxf_url": url_dxf,
+            "failed_items": all_failed_ids # Retorna a lista de IDs de arquivo que falharam
+        }
+
+    except HTTPException as e:
+        # Re-levanta HTTPException para que o FastAPI a capture e retorne ao cliente
+        raise e
+    except FileNotFoundError as e:
+        print(f"[ERROR] Erro de arquivo não encontrado: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        print(f"[ERROR] Erro na composição do plano: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro interno ao processar a requisição: {e}")
+
+@app.post("/mover-arquivos-antigos")
+async def mover_antigos_endpoint(id_pasta_drive: str):
+    """
+    Endpoint para mover arquivos DXF e PNG antigos (com data diferente da atual)
+    para uma subpasta 'arquivo morto' no Google Drive.
+    """
+    print(f"[INFO] Iniciando movimentação de arquivos antigos na pasta: {id_pasta_drive}")
+    try:
+        moved_count = mover_arquivos_antigos(drive_folder_id=id_pasta_drive)
+        print(f"[INFO] {moved_count} arquivos antigos movidos com sucesso.")
+        return {"message": f"{moved_count} arquivos antigos movidos para 'arquivo morto'."}
+    except Exception as e:
+        print(f"[ERROR] Erro ao mover arquivos antigos: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro ao mover arquivos antigos: {e}")
 
 @app.post("/esvaziar-lixeira")
-async def esvaziar_lixeira():
-    drive_service = get_drive_service()
-    if not drive_service:
-        raise HTTPException(status_code=500, detail="Falha ao autenticar com o Google Drive.")
-        
-    success, message = esvaziar_lixeira_drive(drive_service)
-    if not success:
-        raise HTTPException(status_code=500, detail=message)
-        
-    return {"message": message}
-
-@app.post("/excluir-mortos")
-async def excluir_arquivos_mortos():
+async def esvaziar_lixeira_endpoint():
     """
-    Endpoint para excluir "arquivos mortos" da pasta de saída do Drive.
-    "Arquivos mortos" são definidos como arquivos que correspondem ao padrão "Plano de corte..."
-    e são mais antigos que um determinado período (ex: 1 dia).
+    Endpoint para esvaziar permanentemente a lixeira da conta de serviço no Google Drive.
     """
+    print("[INFO] Requisição para esvaziar a lixeira do Drive recebida.")
     try:
-        drive_service = get_drive_service()
-        if not drive_service:
-            raise HTTPException(status_code=500, detail="Falha ao autenticar com o Google Drive.")
-
-        # 1. Listar todos os arquivos na pasta de saída
-        print(f"[INFO] Listando arquivos na pasta de destino: {ID_PASTA_PLANOS_DE_CORTE}")
-        arquivos_na_pasta = listar_todos_arquivos_com_detalhes(drive_service, ID_PASTA_PLANOS_DE_CORTE)
-        
-        if not arquivos_na_pasta:
-            return {"message": "Nenhum arquivo encontrado na pasta de destino. Nada a fazer."}
-
-        # 2. Definir critérios para "arquivo morto"
-        padrao_nome = re.compile(r"^Plano de corte.*\.dxf$", re.IGNORECASE)
-        limite_tempo = datetime.now(timezone.utc) - timedelta(days=1)
-        
-        arquivos_excluidos_count = 0
-        erros_count = 0
-
-        # 3. Iterar e excluir arquivos que correspondem aos critérios
-        for arquivo in arquivos_na_pasta:
-            nome_arquivo = arquivo.get('name')
-            id_arquivo = arquivo.get('id')
-            data_criacao_str = arquivo.get('createdTime')
-            
-            if not all([nome_arquivo, id_arquivo, data_criacao_str]):
-                continue # Pula arquivos com metadados incompletos
-
-            # Verifica o nome do arquivo
-            if padrao_nome.match(nome_arquivo):
-                # Verifica a data de criação
-                data_criacao = isoparse(data_criacao_str)
-                if data_criacao < limite_tempo:
-                    print(f"[INFO] Arquivo '{nome_arquivo}' (ID: {id_arquivo}) marcado para exclusão (criado em {data_criacao}).")
-                    if excluir_arquivo_drive(drive_service, id_arquivo):
-                        arquivos_excluidos_count += 1
-                    else:
-                        erros_count += 1
-
-        if arquivos_excluidos_count == 0 and erros_count == 0:
-            message = "Nenhum arquivo morto (Plano de corte com mais de 1 dia) foi encontrado para excluir."
-        else:
-            message = f"{arquivos_excluidos_count} arquivos mortos foram excluídos com sucesso."
-            if erros_count > 0:
-                message += f" {erros_count} arquivos não puderam ser excluídos devido a erros."
-
-        return {"message": message, "deleted_count": arquivos_excluidos_count}
-
+        esvaziar_lixeira_drive()
+        return {"message": "Lixeira do Google Drive esvaziada com sucesso."}
     except Exception as e:
-        print(f"[ERROR] Erro crítico no endpoint /excluir-mortos: {e}")
-        raise HTTPException(status_code=500, detail=f"Ocorreu um erro interno no servidor: {e}")
+        print(f"[ERROR] Falha ao tentar esvaziar a lixeira: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro ao esvaziar a lixeira: {e}")
 
-print("DEBUG: main.py - Fim do carregamento do módulo. Aplicação FastAPI pronta.")
+@app.get("/")
+async def root():
+    return {"message": "API de Composição DXF e Gerenciamento de Drive está online!"}
 
