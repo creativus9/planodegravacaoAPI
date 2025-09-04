@@ -16,9 +16,13 @@ app = FastAPI()
 # --- Configuração CORS ---
 origins = [
     "http://localhost",
+    "http://192.168.2.123:5173",
+    "http://192.168.2.69:5173",
     "http://localhost:5173", # O endereço padrão do seu frontend React em desenvolvimento
-    "https://web-production-ba02.up.railway.app", # Adicionado a URL do seu Railway
-    "https://script.google.com", # Para permitir requisições do Google Apps Script
+    "https://web-production-a828.up.railway.app", # Adicionado para a URL da sua API
+    "https://script.google.com", # Adicionado para o Google Apps Script
+    # Se você tiver um domínio de produção para o seu frontend, adicione-o aqui também:
+    # "https://seu-dominio-frontend-em-producao.com",
 ]
 
 app.add_middleware(
